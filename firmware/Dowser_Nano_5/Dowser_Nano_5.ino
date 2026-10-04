@@ -4,8 +4,7 @@
 #include <OSCMessage.h>
 #include <EEPROM.h>
 #include <Servo.h>
-#include <avr/wdt.h>
-#include <stdlib.h>
+#include <ctype.h>
 
 // --- PHYSICAL PIN CONFIGURATION ---
 #define BUTTON_PIN 2
@@ -40,7 +39,6 @@ struct DeviceConfiguration {
   uint8_t defaultPos;
   uint8_t irPresets[10];
   // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
-  uint8_t defaultSpeed;
   uint16_t defaultFadeTimeMs;
 };
 
@@ -48,21 +46,23 @@ int targetPos;
 int currentPos;
 int savedTargetPrePause;
 uint16_t activeMoveFadeTimeMs;
+uint8_t activeMoveDistance;
 unsigned long lastMoveUpdateMicros = 0;
 unsigned long movementCredit = 0;
-unsigned int activeMoveDistance = 0;
 bool configLoadedSuccessfully = false;
 
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
-const uint8_t LEGACY_DEFAULT_SPEED = 33;
 const uint16_t DEFAULT_FADE_TIME_MS = 3000;
 const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
-const unsigned long FADE_CREDIT_PER_MS = 1000UL;
+const unsigned long MICROSECONDS_PER_MILLISECOND = 1000UL;
+// Covers the common 20 ms loop interval while limiting catch-up after blocking operations.
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
-static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US * 180UL + MAX_FADE_TIME_MS * FADE_CREDIT_PER_MS <= 0xFFFFFFFFULL,
+const unsigned long MAX_MOVEMENT_DISTANCE_DEGREES = 180UL;
+static_assert((unsigned long long)MAX_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND +
+                (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
 
 int down;
@@ -104,8 +104,10 @@ bool pauseMV = false;
 // Forward declarations
 void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
-bool parseFadeTimeSeconds(const char* text, uint16_t& fadeTimeMs);
-bool isValidFadeTimeMs(uint16_t fadeTimeMs);
+bool isValidFadeTime(int fadeTimeMs);
+bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs);
+bool convertFadeTimeSeconds(float seconds, uint16_t& fadeTimeMs);
+void broadcastFadeTimeConfig();
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
@@ -118,14 +120,17 @@ void processPhysicalButton();
 void processIRInput();
 void updateServo();
 void setMovementTarget(int target, uint16_t fadeTimeMs);
-void setMovementTargetAtDefaultFade(int target);
+void setMovementTargetAtDefaultFadeTime(int target);
 bool getMovementFadeTime(OSCMessage& msg, int argumentIndex, uint16_t& fadeTimeMs);
 void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentIndex);
 void reportInvalidMovementAngle();
+void reportInvalidMovementFadeTime();
 void sendOSCError(const char* path, const char* message);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
+
+bool networkAvailable = false;
 
 void setup() {
   Serial.begin(1000000);
@@ -145,10 +150,15 @@ void setup() {
   upBound = config.upBound;
 
   Ethernet.init(ETHERNET_CS_PIN);
-  initNetwork();
-  Udp.begin(config.localPort);
-
-  telnetServer.begin();
+  Ethernet.begin(mac, IPAddress(0, 0, 0, 0));
+  networkAvailable = (Ethernet.hardwareStatus() != EthernetNoHardware);
+  if (networkAvailable) {
+    initNetwork();
+    Udp.begin(config.localPort);
+    telnetServer.begin();
+  } else {
+    Serial.println(F("Ethernet hardware not found - network disabled"));
+  }
 
   myservo.attach(SERVO_PIN);
   currentPos = down;
@@ -202,6 +212,7 @@ void loop() {
 }
 
 void updateServo() {
+  int previousTargetPos = targetPos;
   if (targetPos > upBound) {
     targetPos = upBound;
   } else if (targetPos < dnBound) {
@@ -209,6 +220,11 @@ void updateServo() {
   }
 
   unsigned long now = micros();
+  if (targetPos != previousTargetPos) {
+    activeMoveDistance = (uint8_t)abs(targetPos - currentPos);
+    movementCredit = 0;
+    lastMoveUpdateMicros = now;
+  }
   unsigned long elapsed = now - lastMoveUpdateMicros;
   lastMoveUpdateMicros = now;
   // Discard excess elapsed time after blocking operations rather than catching up in a large jump.
@@ -222,9 +238,10 @@ void updateServo() {
     movementCredit = 0;
     activeMoveDistance = 0;
   } else if (currentPos != targetPos) {
+    unsigned long fadeDurationUs = (unsigned long)activeMoveFadeTimeMs * MICROSECONDS_PER_MILLISECOND;
     movementCredit += elapsed * activeMoveDistance;
-    unsigned long steps = movementCredit / (activeMoveFadeTimeMs * FADE_CREDIT_PER_MS);
-    movementCredit %= activeMoveFadeTimeMs * FADE_CREDIT_PER_MS;
+    unsigned long steps = movementCredit / fadeDurationUs;
+    movementCredit %= fadeDurationUs;
     int distance = abs(targetPos - currentPos);
     if (steps > (unsigned long)distance) {
       steps = distance;
@@ -236,7 +253,6 @@ void updateServo() {
     }
   } else {
     movementCredit = 0;
-    activeMoveDistance = 0;
   }
 
   if (currentPos != lastReportedPos) {
@@ -246,7 +262,8 @@ void updateServo() {
       currentPresetName = "Closed (Down)";
     } else {
       static char dynamicLabel[24];
-      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), currentPos);
+      strcpy_P(dynamicLabel, PSTR("Angle: "));
+      itoa(currentPos, dynamicLabel + 7, 10);
       currentPresetName = dynamicLabel;
     }
 
@@ -265,11 +282,12 @@ void setMovementTarget(int target, uint16_t fadeTimeMs) {
     targetPos = target;
   }
   activeMoveFadeTimeMs = fadeTimeMs;
+  activeMoveDistance = (uint8_t)abs(targetPos - currentPos);
   movementCredit = 0;
-  activeMoveDistance = abs(targetPos - currentPos);
+  lastMoveUpdateMicros = micros();
 }
 
-void setMovementTargetAtDefaultFade(int target) {
+void setMovementTargetAtDefaultFadeTime(int target) {
   setMovementTarget(target, config.defaultFadeTimeMs);
 }
 
@@ -279,11 +297,13 @@ bool getMovementFadeTime(OSCMessage& msg, int argumentIndex, uint16_t& fadeTimeM
     return true;
   }
   if (msg.size() != argumentIndex + 1) return false;
-  if (!msg.isInt(argumentIndex) && !msg.isFloat(argumentIndex)) return false;
-  float seconds = msg.isInt(argumentIndex) ? msg.getInt(argumentIndex) : msg.getFloat(argumentIndex);
-  if (!(seconds >= 0.0f && seconds <= 60.0f)) return false;
-  fadeTimeMs = (uint16_t)(seconds * 1000.0f + 0.5f);
-  return true;
+  if (msg.isInt(argumentIndex)) {
+    return convertFadeTimeSeconds(msg.getInt(argumentIndex), fadeTimeMs);
+  }
+  if (msg.isFloat(argumentIndex)) {
+    return convertFadeTimeSeconds(msg.getFloat(argumentIndex), fadeTimeMs);
+  }
+  return false;
 }
 
 void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentIndex) {
@@ -291,12 +311,13 @@ void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentI
   if (getMovementFadeTime(msg, fadeTimeArgumentIndex, fadeTimeMs)) {
     setMovementTarget(target, fadeTimeMs);
   } else {
-    sendOSCError("/dowser/error/fade", "Fade must be a number from 0.0 to 60.0 seconds");
+    reportInvalidMovementFadeTime();
   }
 }
 
 void sendOSCError(const char* path, const char* message) {
   Serial.println(message);
+  if (!networkAvailable) return;
   IPAddress senderIP = Udp.remoteIP();
   unsigned int senderPort = Udp.remotePort();
   OSCMessage error(path);
@@ -304,6 +325,10 @@ void sendOSCError(const char* path, const char* message) {
   Udp.beginPacket(senderIP, senderPort);
   error.send(Udp);
   Udp.endPacket();
+}
+
+void reportInvalidMovementFadeTime() {
+  sendOSCError("/dowser/error/fade", "Fade time must be a number from 0-60 seconds");
 }
 
 void reportInvalidMovementAngle() {
@@ -345,6 +370,7 @@ void broadcastCompanionState() {
   msgAngle.empty(); msgUp.empty(); msgDown.empty(); msgQLab.empty();
 }*/
 void broadcastCompanionState() {
+  if (!networkAvailable) return;
   // 1. Prepare QLab workspace payloads
   char noteBuffer[16];
   itoa(currentPos, noteBuffer, 10);
@@ -393,8 +419,10 @@ void broadcastCompanionState() {
 }
 // Helper to broadcast a single integer configuration item
 void broadcastConfigItem(const char* subPath, int value) {
+  if (!networkAvailable) return;
   char fullPath[50];
-  snprintf(fullPath, sizeof(fullPath), "/dowser/config/%s", subPath);
+  strcpy_P(fullPath, PSTR("/dowser/config/"));
+  strcat(fullPath, subPath);
 
   OSCMessage msg(fullPath);
   msg.add(value);
@@ -409,21 +437,9 @@ void broadcastConfigItem(const char* subPath, int value) {
   msg.empty();
 }
 
-void broadcastFadeTime() {
-  OSCMessage msg("/dowser/config/fade");
-  msg.add(config.defaultFadeTimeMs / 1000.0f);
-  for (uint8_t i = 0; i < 3; i++) {
-    uint16_t activePort = config.targetPorts[i];
-    if (activePort == 0) continue;
-    Udp.beginPacket(currentTargetIP, activePort);
-    msg.send(Udp);
-    Udp.endPacket();
-  }
-  msg.empty();
-}
-
 // Bulk dump function to sync all Companion configuration fields at once
 void broadcastAllConfigSettings() {
+  if (!networkAvailable) return;
   broadcastConfigItem("down", config.posDown);
   delay(20);
   broadcastConfigItem("up", config.posUp);
@@ -448,10 +464,26 @@ void broadcastAllConfigSettings() {
   delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
   delay(20);
-  broadcastFadeTime();
+  broadcastFadeTimeConfig();
+}
+
+void broadcastFadeTimeConfig() {
+  if (!networkAvailable) return;
+  OSCMessage msg("/dowser/config/fade");
+  msg.add((float)config.defaultFadeTimeMs / 1000.0f);
+
+  for (uint8_t i = 0; i < 3; i++) {
+    uint16_t activePort = config.targetPorts[i];
+    if (activePort == 0) continue;
+    Udp.beginPacket(currentTargetIP, activePort);
+    msg.send(Udp);
+    Udp.endPacket();
+  }
+  msg.empty();
 }
 
 void processIncomingOSC() {
+  if (!networkAvailable) return;
   OSCMessage msgIn;
   int packetSize = Udp.parsePacket();
 
@@ -493,22 +525,6 @@ void processIncomingOSC() {
       // Bulk Query Trigger
       msgIn.route("/dowser/config/queryAll", [](OSCMessage& msg, int offset) {
         broadcastAllConfigSettings();
-      });
-
-      msgIn.route("/dowser/config/fade", [](OSCMessage& msg, int offset) {
-        if (msg.size() == 0) {
-          broadcastFadeTime();
-          return;
-        }
-        if (msg.size() == 1 && (msg.isInt(0) || msg.isFloat(0))) {
-          float seconds = msg.isInt(0) ? msg.getInt(0) : msg.getFloat(0);
-          if (seconds >= 0.0f && seconds <= 60.0f) {
-            config.defaultFadeTimeMs = (uint16_t)(seconds * 1000.0f + 0.5f);
-            broadcastFadeTime();
-            return;
-          }
-        }
-        sendOSCError("/dowser/error/fade", "Fade must be a number from 0.0 to 60.0 seconds");
       });
 
       // Commit changes permanently to EEPROM
@@ -581,6 +597,18 @@ void processIncomingOSC() {
           config.heartbeatEnabled = (msg.getInt(0) == 1) ? 1 : 0;
         }
         broadcastConfigItem("heartbeat", config.heartbeatEnabled);
+      });
+
+      msgIn.route("/dowser/config/fade", [](OSCMessage& msg, int offset) {
+        if (msg.size() > 0) {
+          uint16_t fadeTimeMs;
+          if (msg.size() == 1 && getMovementFadeTime(msg, 0, fadeTimeMs)) {
+            config.defaultFadeTimeMs = fadeTimeMs;
+          } else {
+            reportInvalidMovementFadeTime();
+          }
+        }
+        broadcastFadeTimeConfig();
       });
 
       // Network Infrastructure Ports
@@ -715,7 +743,7 @@ void processPhysicalButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == 1) {
-        setMovementTargetAtDefaultFade((targetPos == down) ? up : down);
+        setMovementTargetAtDefaultFadeTime((targetPos == down) ? up : down);
         ledState = LOW;
       } else {
         ledState = HIGH;
@@ -738,22 +766,22 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: setMovementTargetAtDefaultFade(currentPos + 1); break;
-    case 0xBB44FF00: setMovementTargetAtDefaultFade(currentPos - 5); break;
+    case 0xB946FF00: setMovementTargetAtDefaultFadeTime(currentPos + 1); break;
+    case 0xBB44FF00: setMovementTargetAtDefaultFadeTime(currentPos - 5); break;
     case 0xBF40FF00:
       if (pauseMV) {
-        setMovementTargetAtDefaultFade(savedTargetPrePause);
+        setMovementTargetAtDefaultFadeTime(savedTargetPrePause);
         pauseMV = false;
       } else {
         savedTargetPrePause = targetPos;
-        setMovementTargetAtDefaultFade(currentPos);
+        setMovementTargetAtDefaultFadeTime(currentPos);
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: setMovementTargetAtDefaultFade(currentPos + 5); break;
-    case 0xF807FF00: setMovementTargetAtDefaultFade(down); break;
-    case 0xEA15FF00: setMovementTargetAtDefaultFade(currentPos - 1); break;
-    case 0xF609FF00: setMovementTargetAtDefaultFade(up); break;
+    case 0xBC43FF00: setMovementTargetAtDefaultFadeTime(currentPos + 5); break;
+    case 0xF807FF00: setMovementTargetAtDefaultFadeTime(down); break;
+    case 0xEA15FF00: setMovementTargetAtDefaultFadeTime(currentPos - 1); break;
+    case 0xF609FF00: setMovementTargetAtDefaultFadeTime(up); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
     case 0xF30CFF00: handleIRPreset(1); break;
@@ -778,17 +806,31 @@ void handleIRPreset(int num) {
       config.irPresets[num] = (uint8_t)currentPos;
     }
   } else {
-    setMovementTargetAtDefaultFade(config.irPresets[num]);
+    setMovementTargetAtDefaultFadeTime(config.irPresets[num]);
   }
 }
 
 void loadConfiguration() {
   EEPROM.get(0, config);
-  if (config.magicNumber == EEPROM_MAGIC_V1 || config.magicNumber == EEPROM_MAGIC_V2) {
-    // Older configuration prefixes remain unchanged; initialize the new fade field during migration.
+  if (config.magicNumber == EEPROM_MAGIC_V1) {
     config.magicNumber = EEPROM_MAGIC_V3;
-    config.defaultSpeed = LEGACY_DEFAULT_SPEED;
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+    EEPROM.put(0, config);
+    return;
+  }
+
+  if (config.magicNumber == EEPROM_MAGIC_V2) {
+    // The V2 field's low byte contains its former one-byte speed setting.
+    uint8_t legacySpeed = (uint8_t)config.defaultFadeTimeMs;
+    config.magicNumber = EEPROM_MAGIC_V3;
+    if (legacySpeed >= 1 && legacySpeed <= 100) {
+      unsigned long migratedFadeTimeMs = 100000UL / legacySpeed;
+      if (migratedFadeTimeMs < MIN_FADE_TIME_MS) migratedFadeTimeMs = MIN_FADE_TIME_MS;
+      if (migratedFadeTimeMs > MAX_FADE_TIME_MS) migratedFadeTimeMs = MAX_FADE_TIME_MS;
+      config.defaultFadeTimeMs = (uint16_t)migratedFadeTimeMs;
+    } else {
+      config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+    }
     EEPROM.put(0, config);
     return;
   }
@@ -824,12 +866,11 @@ void loadConfiguration() {
     config.dnBound = 7;
     config.upBound = 173;
     config.defaultPos = 10;
-    config.defaultSpeed = LEGACY_DEFAULT_SPEED;
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     memcpy(config.irPresets, defaultIR, 10);
     EEPROM.put(0, config);
-  } else if (!isValidFadeTimeMs(config.defaultFadeTimeMs)) {
+  } else if (!isValidFadeTime(config.defaultFadeTimeMs)) {
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     EEPROM.put(0, config);
   }
@@ -845,6 +886,7 @@ void parseSerialIP(char* inputStr, uint8_t* ipArray) {
 }
 
 void processTelnetConsole() {
+  if (!networkAvailable) return;
   if (!telnetClient.connected()) {
     EthernetClient incomingClient = telnetServer.accept();
     if (incomingClient) {
@@ -892,17 +934,58 @@ bool parseKeyValue(const char* input, const char* key, int& outValue) {
   return false;
 }
 
-bool parseFadeTimeSeconds(const char* text, uint16_t& fadeTimeMs) {
-  if (text == NULL || *text == '\0') return false;
-  char* end = NULL;
-  double seconds = strtod(text, &end);
-  if (end == text || *end != '\0' || !(seconds >= 0.0 && seconds <= 60.0)) return false;
-  fadeTimeMs = (uint16_t)(seconds * 1000.0 + 0.5);
-  return isValidFadeTimeMs(fadeTimeMs);
+bool isValidFadeTime(int fadeTimeMs) {
+  return fadeTimeMs >= MIN_FADE_TIME_MS && fadeTimeMs <= MAX_FADE_TIME_MS;
 }
 
-bool isValidFadeTimeMs(uint16_t fadeTimeMs) {
-  return fadeTimeMs >= MIN_FADE_TIME_MS && fadeTimeMs <= MAX_FADE_TIME_MS;
+bool convertFadeTimeSeconds(float seconds, uint16_t& fadeTimeMs) {
+  if (!(seconds >= 0.0f && seconds <= 60.0f)) return false;
+  fadeTimeMs = (uint16_t)(seconds * 1000.0f + 0.5f);
+  return true;
+}
+
+bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
+  while (isspace((unsigned char)*value)) value++;
+  if (*value == '+') value++;
+
+  unsigned int wholeSeconds = 0;
+  bool hasDigit = false;
+  while (isdigit((unsigned char)*value)) {
+    hasDigit = true;
+    unsigned int digit = (unsigned int)(*value++ - '0');
+    if (wholeSeconds > 6 || (wholeSeconds == 6 && digit > 0)) return false;
+    wholeSeconds = wholeSeconds * 10 + digit;
+  }
+
+  unsigned int fractionalMs = 0;
+  uint16_t fractionalPlace = 100;
+  bool roundUp = false;
+  bool roundingDigitSeen = false;
+  bool hasNonZeroFraction = false;
+  if (*value == '.') {
+    value++;
+    while (isdigit((unsigned char)*value)) {
+      hasDigit = true;
+      if (*value != '0') hasNonZeroFraction = true;
+      if (fractionalPlace > 0) {
+        fractionalMs += (unsigned int)(*value - '0') * fractionalPlace;
+        fractionalPlace /= 10;
+      } else if (!roundingDigitSeen) {
+        roundUp = *value >= '5';
+        roundingDigitSeen = true;
+      }
+      value++;
+    }
+  }
+
+  while (isspace((unsigned char)*value)) value++;
+  if (!hasDigit || *value != '\0' ||
+      (wholeSeconds == 60 && hasNonZeroFraction)) return false;
+
+  unsigned int totalMs = wholeSeconds * 1000 + fractionalMs + (roundUp ? 1 : 0);
+  if (!isValidFadeTime(totalMs)) return false;
+  fadeTimeMs = (uint16_t)totalMs;
+  return true;
 }
 
 void handleCommonConsoleCommands(char* input, Print& output) {
@@ -910,7 +993,28 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-    output.println(F("Keys: down, up, dnbound, upbound, default, fade, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
+#if defined(__AVR__)
+    output.println(F("<angle>, up, down, show, save, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
+#else
+    output.println(F("Commands:"));
+    output.println(F("  <angle>        move to angle, e.g. 90"));
+    output.println(F("  up / down      move to the saved up/down preset"));
+    output.println(F("  show           print current settings"));
+    output.println(F("  save           write settings to EEPROM and reboot"));
+    output.println(F("  key=value      change a setting (staged until save):"));
+    output.println(F("    down, up, default      angles, e.g. up=120"));
+    output.println(F("    dnbound, upbound       limits 0-180"));
+    output.println(F("    fade                   seconds 0-60, e.g. fade=0.4"));
+    output.println(F("    localport, targetport[0-2]"));
+    output.println(F("    static (0/1), telemetry, heartbeat (0/1)"));
+    output.println(F("    ip, targetip           e.g. ip=192.168.1.50"));
+#endif
+    return;
+  }
+
+  if (strcasecmp(input, "up") == 0 || strcasecmp(input, "down") == 0) {
+    setMovementTargetAtDefaultFadeTime((input[0] == 'u' || input[0] == 'U') ? config.posUp : config.posDown);
+    dispatchMessage(source, F("Move -> "), targetPos);
     return;
   }
 
@@ -965,8 +1069,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(currentPos);
     output.println(F(" deg"));
     output.print(F("Default Fade  : "));
-    output.print(config.defaultFadeTimeMs / 1000.0f, 3);
-    output.println(F(" seconds"));
+    output.print(config.defaultFadeTimeMs / 1000);
+    output.print('.');
+    uint16_t fractionalMs = config.defaultFadeTimeMs % 1000;
+    if (fractionalMs < 100) output.print('0');
+    if (fractionalMs < 10) output.print('0');
+    output.print(fractionalMs);
+    output.println(F(" s"));
     return;
   }
 
@@ -1026,7 +1135,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultFadeTimeMs = fadeTimeMs;
       dispatchMessage(source, F("Set Default Fade (ms) -> "), fadeTimeMs);
     } else {
-      output.println(F("Error: Fade must be 0.0-60.0 seconds"));
+      dispatchMessage(source, F("Error: Fade must be 0-60 seconds"));
     }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;
@@ -1054,14 +1163,22 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   } else if (isdigit(input[0])) {
     int parsedVal = atoi(input);
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
-      setMovementTargetAtDefaultFade(parsedVal);
+      setMovementTargetAtDefaultFadeTime(parsedVal);
       dispatchMessage(source, F("Move -> "), targetPos);
+    } else {
+      output.println(F("Error: Angle out of range"));
     }
+  } else {
+    output.println(F("Unknown command. Type help (use key=value, e.g. up=120)"));
   }
 }
 
 void rebootDevice() {
   Serial.flush();
+#if defined(ARDUINO_ARCH_RENESAS) || defined(ARDUINO_ARCH_RENESAS_UNO)
+  NVIC_SystemReset();
+#else
   _PROTECTED_WRITE(RSTCTRL.SWRR, RSTCTRL_SWRE_bm);
+#endif
   while (true) {}
 }

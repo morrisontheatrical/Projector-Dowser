@@ -53,6 +53,13 @@ bool configLoadedSuccessfully = false;
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t DEFAULT_SPEED = 33;
+const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
+const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
+const unsigned long SPEED_PERCENT_SCALE = 100UL;
+const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
+const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
+    (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
+    (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
 
 int down;
 int up;
@@ -197,9 +204,9 @@ void updateServo() {
   if (elapsed > 1000000UL) elapsed = 1000000UL;
 
   if (currentPos != targetPos) {
-    movementCredit += elapsed * 18UL * activeMoveSpeed;
-    unsigned long steps = movementCredit / 10000000UL;
-    movementCredit %= 10000000UL;
+    movementCredit += elapsed * MOVEMENT_CREDIT_PER_US_PER_PERCENT * activeMoveSpeed;
+    unsigned long steps = movementCredit / MOVEMENT_CREDIT_PER_DEGREE;
+    movementCredit %= MOVEMENT_CREDIT_PER_DEGREE;
     int distance = abs(targetPos - currentPos);
     if (steps > (unsigned long)distance) {
       steps = distance;
@@ -646,8 +653,8 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: setMovementTarget(currentPos + 1, config.defaultSpeed); break;
-    case 0xBB44FF00: setMovementTarget(currentPos - 5, config.defaultSpeed); break;
+    case 0xB946FF00: setMovementTarget(targetPos + 1, config.defaultSpeed); break;
+    case 0xBB44FF00: setMovementTarget(targetPos - 5, config.defaultSpeed); break;
     case 0xBF40FF00:
       if (pauseMV) {
         setMovementTarget(savedTargetPrePause, config.defaultSpeed);
@@ -658,9 +665,9 @@ void translateIRCommand(long IRData) {
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: setMovementTarget(currentPos + 5, config.defaultSpeed); break;
+    case 0xBC43FF00: setMovementTarget(targetPos + 5, config.defaultSpeed); break;
     case 0xF807FF00: setMovementTarget(down, config.defaultSpeed); break;
-    case 0xEA15FF00: setMovementTarget(currentPos - 1, config.defaultSpeed); break;
+    case 0xEA15FF00: setMovementTarget(targetPos - 1, config.defaultSpeed); break;
     case 0xF609FF00: setMovementTarget(up, config.defaultSpeed); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
@@ -914,7 +921,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultSpeed = (uint8_t)val;
       dispatchMessage(source, F("Set Default Speed -> "), val);
     } else {
-      output.println(F("Error: Speed must be 1-100%"));
+      dispatchMessage(source, F("Error: Speed must be 1-100%"));
     }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;

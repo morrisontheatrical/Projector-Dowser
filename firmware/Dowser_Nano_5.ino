@@ -215,10 +215,12 @@ void updateServo() {
   if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
   if (activeMoveFadeTimeMs == 0) {
-    currentPos = targetPos;
+    if (currentPos != targetPos) {
+      currentPos = targetPos;
+      myservo.write(currentPos);
+    }
     movementCredit = 0;
     activeMoveDistance = 0;
-    myservo.write(currentPos);
   } else if (currentPos != targetPos) {
     movementCredit += elapsed * activeMoveDistance;
     unsigned long steps = movementCredit / (activeMoveFadeTimeMs * FADE_CREDIT_PER_MS);

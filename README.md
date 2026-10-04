@@ -35,8 +35,8 @@ The Projector Dowser is a custom-built theatrical automation device that:
 | **Microcontroller** | Arduino Nano R4 for the current repository sketch; the separate installed Nano Every versions are described above |
 | **Motor control** | Servo signal output on pin 3 |
 | **Ethernet interface** | SPI Ethernet interface, chip-select pin 10 |
-| **IR Receiver** | 38kHz IR receiver module (pin 5) |
-| **Button** | Tactile pushbutton (pin 2) |
+| **IR Receiver** | IR receiver input (pin 5; remote protocol/codes depend on the remote) |
+| **Button** | Digital input (pin 2) |
 | **LED** | Status indicator (pin 4) |
 | **Serial** | USB serial console at 1,000,000 baud |
 
@@ -64,21 +64,21 @@ wiring against the actual installation before connecting or uploading firmware.
 | `/dowser/config/down` | `int` | Broadcasts current down position | Sets down position (validated) |
 | `/dowser/config/dnbound` | `int` | Broadcasts lower hard limit | Sets lower hard limit (0-180°) |
 | `/dowser/config/upbound` | `int` | Broadcasts upper hard limit | Sets upper hard limit (0-180°) |
-| `/dowser/config/default` | `int` | Broadcasts boot default | Sets boot default position |
+| `/dowser/config/default` | `int` | Broadcasts stored default position | Sets stored default position |
 | `/dowser/config/localport` | `int` | Broadcasts listening port | Sets listening port |
 | `/dowser/config/targetport[0-2]` | `int` | Broadcasts destination port | Sets destination port |
 | `/dowser/config/static` | `0\|1` | Broadcasts static IP mode | Enables/disables static IP |
 | `/dowser/config/telemetry` | `0\|1\|2` | Broadcasts telemetry mode | Sets telemetry routing mode |
 | `/dowser/config/heartbeat` | `0\|1` | Broadcasts heartbeat state | Enables/disables heartbeat |
-| `/dowser/config/fade` | `int` or `float` (1-60 seconds) | Broadcasts default fade time | Sets persistent default move duration |
+| `/dowser/config/fade` | `int` or `float` (1-60 seconds) | Broadcasts default fade time | Sets the default move duration |
 | `/dowser/config/queryAll` | — | Broadcasts all 13 config fields | N/A (query only) |
 | `/dowser/config/save` | — | N/A | Saves config to EEPROM + reboot |
 
 Fade time is the requested duration for the entire move, in seconds. Integer and decimal values are accepted (for example, `/dowser/up 2.5` fades to the up preset over 2.5 seconds, while `/dowser/angle 90 4.25` takes 4.25 seconds to reach 90°). Times are stored and applied internally to the nearest millisecond. The actual commanded slew rate scales with the distance to the target, so a shorter move takes the requested duration at a lower rate. Shorter times move faster; longer times may reduce abruptness and noise, but do not guarantee a quieter physical servo. The valid range is 1-60 seconds. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; elapsed-time catch-up is capped to 20 ms per update after longer delays.
 
-Each move keeps the fade time selected when it started. Changing `/dowser/config/fade` or `fade=` affects subsequent moves, not one already in progress.
+Each move keeps the fade time selected when it started. Changing `/dowser/config/fade` or `fade=` affects subsequent moves, not one already in progress. Configuration changes are held in RAM until `save` writes them to EEPROM and reboots the board. Network settings such as the local listening port take effect after reboot.
 
-Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer or float from 1 to 60 seconds. These arguments replace the former speed percentages and millisecond values, so clients sending either must be updated to send seconds. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the boot position (`config.defaultPos`).
+Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer or float from 1 to 60 seconds. These arguments replace the former speed percentages and millisecond values, so clients sending either must be updated to send seconds. OSC float angles are checked against the configured bounds and then converted to an integer degree. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the stored default position (`config.defaultPos`).
 
 Suggested hardware checks: compare short and long fade times, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid fade times (0.99, 60.01, or a non-numeric value) and out-of-bounds angles return errors without starting a move. Query/set `/dowser/config/fade` with no argument, valid integer and decimal values, and invalid values. Set `fade=4.25`, save, and reboot to check persistence; on legacy 0x53/0x55 devices, confirm existing settings remain intact.
 
@@ -98,20 +98,23 @@ These are not guaranteed fixed-rate streams.
 ### Telemetry Modes
 
 **Mode 0 (Dynamic Registration / Reply-to-Sender)**  
-Automatically detects the last device that sent a command and broadcasts telemetry back to it. Ideal for:
+Targets telemetry at the IP address of the most recent OSC sender and sends it
+to the configured target ports. Ideal for:
 - Lab troubleshooting
 - Mobile tech tables on DHCP networks
 
 Fallback: If device hasn't received any OSC yet, uses `fixedTargetIP`.
 
 **Mode 1 (Fixed Target / Unicast)**  
-Locks telemetry to a single hardcoded IP address. Ideal for:
+Locks telemetry to the configured target IP address. Ideal for:
 - Permanent installations
 - Dedicated Companion Mac Studio
 - Eliminating rogue network traffic
 
 **Mode 2 (Subnet Broadcast)**  
-Broadcasts to all hosts on the local subnet (`.255` address). Ideal for:
+Sets the destination to the controller's local IP with the last octet changed
+to `.255`. This assumes a subnet where that address is the broadcast address.
+Ideal for:
 - Dynamic environments
 - Multi-subscriber setups (QLab + Companion simultaneously)
 - Single-subnet deployments
@@ -152,7 +155,7 @@ All codes specific to your remote model:
 | Right (Vol+) | `0xB946FF00` | Increment +1° |
 | Left (Vol−) | `0xEA15FF00` | Decrement −1° |
 | Preset Edit | `0xB847FF00` | Toggle edit mode |
-| Buttons [0-9] | `0xE916FF00` - `0xB54AFF00` | Call preset [0-9] or save (in edit mode) |
+| Number buttons | `0: E916FF00`, `1: F30CFF00`, `2: E718FF00`, `3: A15EFF00`, `4: F708FF00`, `5: E31CFF00`, `6: A55AFF00`, `7: BD42FF00`, `8: AD52FF00`, `9: B54AFF00` | Call preset or save (in edit mode) |
 | Play/Pause | `0xBF40FF00` | Pause/resume toggle |
 | Power | `0xF20DFF00` | Detach servo (soft-disable) |
 | Plus | `0xBC43FF00` | Increment +5° |
@@ -175,7 +178,7 @@ Connect via USB for direct serial command interface:
 
 ```bash
 # Example commands
-show                # Display all settings
+show                # Display network, position, and fade settings
 up                  # Move to up position
 down                # Move to down position
 90                  # Move to 90°
@@ -183,7 +186,7 @@ down=10             # Set down position to 10°
 up=170              # Set up position to 170°
 dnbound=5           # Set lower hard limit to 5°
 upbound=175         # Set upper hard limit to 175°
-default=90          # Set boot default to 90°
+default=90          # Set stored default position to 90°
 fade=3.0            # Set default movement fade time (1-60 seconds)
 localport=8001      # Set listening port
 targetport0=12000   # Set target port 0
@@ -199,7 +202,7 @@ help                # Show available commands
 ```
 
 ### 4. **Telnet Console (Port 23)**
-Same commands as serial console, accessible over network:
+The same command parser as the serial console is available over the network:
 
 ```bash
 nc 10.0.0.100 23           # macOS
@@ -210,7 +213,7 @@ telnet 10.0.0.100 23       # Windows/Linux
 **Features**:
 - Real-time echo with backspace support
 - Automatic disconnect after 120 seconds idle
-- Shared message dispatch to both serial + Telnet simultaneously
+- Some status messages are dispatched to both serial and Telnet
 
 ### 5. **OSC (Ethernet, Port 8001)**
 Native OSC protocol for QLab, Companion, or any OSC controller:
@@ -231,15 +234,15 @@ client.send_message("/dowser/query", "")     # Request state
 
 ```
 loop()
-├─ Telemetry Engine (20Hz gated)
-│  ├─ Motion detection → broadcast if targetPos changed
-│  └─ Idle heartbeat → broadcast every 1 second (if static)
+├─ Telemetry check (50ms gated; updateServo also sends on position changes)
+│  ├─ Motion detection → broadcast if currentPos changed
+│  └─ Static refresh → broadcast about every 1 second
 ├─ processIncomingOSC() → handle /dowser/*, /cue/* commands
 ├─ processTelnetConsole() → handle Telnet input
 ├─ processSerialConsole() → handle USB serial input
 ├─ processPhysicalButton() → debounced button (pin 2)
 ├─ processIRInput() → IR remote decoder (pin 5)
-└─ updateServo() → write targetPos to servo, broadcast on change
+└─ updateServo() → write targetPos to servo, broadcast on position change
 ```
 
 ### Key Modules
@@ -295,11 +298,10 @@ Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place t
 
 The tracked sketch includes these headers:
 
-- **SPI** (built-in)
-- **Ethernet**
-- **EthernetUdp** (built-in)
-- **Servo** (built-in)
-- **EEPROM** (built-in)
+- **SPI**
+- **Ethernet** (includes `EthernetUdp`)
+- **Servo**
+- **EEPROM**
 - **OSCMessage.h** – OSC message codec compatible with the sketch's API
 - **[IRremote](https://github.com/Arduino-IRremote/Arduino-IRremote)** – IR decoder (v4.x)
 
@@ -324,7 +326,7 @@ build requirements.
 5. Open `firmware/Dowser_Nano_5/Dowser_Nano_5.ino` and upload to the Nano R4
 
 ### 3. Initial Configuration
-- **USB Serial**: Connect, send `show` to verify defaults
+- **USB Serial**: Connect and send `show` to inspect current settings
 - **Network**: Ping `10.0.0.100` (or your static IP)
 - **Servo calibration**: Send `90` to test movement; verify smooth range
 - **IR test**: Press remote buttons and watch serial output for codes
@@ -356,7 +358,7 @@ On power-up or reboot:
 - Check Ethernet cable connection
 - Verify IP: `Serial.println(Ethernet.localIP());` in serial monitor
 - Ping the device: `ping 10.0.0.100`
-- Check telemetry mode: `show` command (should be 2 by default)
+- Check telemetry mode with `show` (factory default is 2; saved settings may differ)
 
 ### Servo moves erratically
 - Verify the installed motor power and ground wiring
@@ -371,7 +373,7 @@ On power-up or reboot:
 
 ### QLab/Companion not receiving telemetry
 - Verify telemetry mode: `telemetry=2` for broadcast, `telemetry=1` for fixed target
-- Check target port: default is 12000 (Companion), 53000 (QLab)
+- Check configured target ports (factory defaults: 12000 and 53000)
 - Verify firewall allows UDP on those ports
 - Test with `nc -l -u 12000` and send `/dowser/query`
 
@@ -382,9 +384,8 @@ On power-up or reboot:
 
 ## Roadmap / Future Enhancements
 
-- [ ] Version config struct for non-destructive firmware updates
 - [ ] Auto-save IR presets to EEPROM (currently manual `save` required)
-- [ ] Velocity/ramping profiles for smoother servo motion
+- [ ] Acceleration/deceleration profiles for smoother servo motion
 - [ ] Diagnostic telemetry (servo current, temperature, error states)
 - [ ] Web UI for configuration (via simple HTTP server)
 - [ ] Dual-servo support (for separate iris + shutter)

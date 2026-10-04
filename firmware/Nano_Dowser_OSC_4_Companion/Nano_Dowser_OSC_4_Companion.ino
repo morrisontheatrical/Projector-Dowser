@@ -38,6 +38,7 @@ struct DeviceConfiguration {
   uint8_t upBound;
   uint8_t defaultPos;
   uint8_t irPresets[10];
+  // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
   uint8_t defaultSpeed;
 };
 
@@ -45,7 +46,7 @@ int targetPos;
 int currentPos;
 int savedTargetPrePause;
 uint8_t activeMoveSpeed;
-unsigned long lastMoveUpdate = 0;
+unsigned long lastMoveUpdateMicros = 0;
 unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
 
@@ -137,7 +138,7 @@ void setup() {
   targetPos = down;
   activeMoveSpeed = config.defaultSpeed;
   myservo.write(currentPos);
-  lastMoveUpdate = millis();
+  lastMoveUpdateMicros = micros();
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -190,15 +191,15 @@ void updateServo() {
     targetPos = dnBound + 1;
   }
 
-  unsigned long now = millis();
-  unsigned long elapsed = now - lastMoveUpdate;
-  lastMoveUpdate = now;
-  if (elapsed > 1000) elapsed = 1000;
+  unsigned long now = micros();
+  unsigned long elapsed = now - lastMoveUpdateMicros;
+  lastMoveUpdateMicros = now;
+  if (elapsed > 1000000UL) elapsed = 1000000UL;
 
   if (currentPos != targetPos) {
     movementCredit += elapsed * 18UL * activeMoveSpeed;
-    unsigned long steps = movementCredit / 10000UL;
-    movementCredit %= 10000UL;
+    unsigned long steps = movementCredit / 10000000UL;
+    movementCredit %= 10000000UL;
     int distance = abs(targetPos - currentPos);
     if (steps > (unsigned long)distance) {
       steps = distance;
@@ -233,7 +234,7 @@ void setMovementTarget(int target, uint8_t speed) {
   targetPos = target;
   activeMoveSpeed = speed;
   movementCredit = 0;
-  lastMoveUpdate = millis();
+  lastMoveUpdateMicros = micros();
 }
 
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {

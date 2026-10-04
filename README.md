@@ -44,7 +44,7 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 | `/dowser/down` | optional `int speed` | Move to the "down" preset at the default speed or the supplied one-move speed |
 | `/dowser/angle` | `int` or `float` angle, optional `int speed` | Move to a specific angle (degrees), optionally overriding speed for this move |
 | `/dowser/query` | — | Request immediate state broadcast |
-| `/dowser/reset` | optional `int speed` | Move to default position, optionally overriding speed for this move |
+| `/dowser/reset` | optional `int speed` | Move to the down preset, optionally overriding speed for this move |
 
 #### Configuration (GET/SET REST-style)
 | Endpoint | Args | GET Response | SET Behavior |
@@ -64,6 +64,8 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 | `/dowser/config/save` | — | N/A | Saves config to EEPROM + reboot |
 
 Movement speed is a percentage of the maximum commanded slew rate (180°/s): 100% is the maximum and lower values move more slowly. For example, `/dowser/up 30` uses 30% speed for that move, while `/dowser/angle 90 50` moves to 90° at 50%. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; this controls commanded servo position changes, not guaranteed physical speed or mechanical noise.
+
+Suggested hardware checks: compare movement at 100% and 50%, retarget during a move and confirm it continues from the current reported angle, and verify invalid overrides (0, 101, or a non-integer) do not start a move. Set `speed=50`, save, and reboot to check persistence; on a legacy 0x53 device, confirm existing settings remain intact and the new default is 33%.
 
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |

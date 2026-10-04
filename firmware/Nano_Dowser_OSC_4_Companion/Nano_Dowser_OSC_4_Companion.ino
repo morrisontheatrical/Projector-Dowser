@@ -214,10 +214,11 @@ void updateServo() {
   unsigned long now = micros();
   unsigned long elapsed = now - lastMoveUpdateMicros;
   lastMoveUpdateMicros = now;
-  // Capping elapsed time keeps the 32-bit credit multiplication and addition in range.
+  // Time beyond this cap is discarded after long blocking operations to keep 32-bit math safe.
   if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
   if (currentPos != targetPos) {
+    // Credit stays below one degree after modulo and is carried through retargets.
     movementCredit += elapsed * MOVEMENT_CREDIT_PER_US_PER_PERCENT * activeMoveSpeed;
     unsigned long steps = movementCredit / MOVEMENT_CREDIT_PER_DEGREE;
     movementCredit %= MOVEMENT_CREDIT_PER_DEGREE;
@@ -446,11 +447,12 @@ void processIncomingOSC() {
           reportInvalidMovementAngle();
           return;
         }
-        int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
-        if (angle < config.dnBound || angle > config.upBound) {
+        float requestedAngle = msg.isInt(0) ? msg.getInt(0) : msg.getFloat(0);
+        if (requestedAngle < config.dnBound || requestedAngle > config.upBound) {
           reportInvalidMovementAngle();
           return;
         }
+        int angle = (int)requestedAngle;
         setMovementTargetFromOSC(msg, angle, 1);
       });
       msgIn.route("/dowser/query", [](OSCMessage& msg, int offset) {
@@ -540,9 +542,13 @@ void processIncomingOSC() {
       });
 
       msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
-        if (msg.size() == 1 && msg.isInt(0)) {
-          int val = msg.getInt(0);
-          if (val >= 1 && val <= 100) config.defaultSpeed = (uint8_t)val;
+        if (msg.size() > 0) {
+          if (msg.size() == 1 && msg.isInt(0) &&
+              msg.getInt(0) >= 1 && msg.getInt(0) <= 100) {
+            config.defaultSpeed = (uint8_t)msg.getInt(0);
+          } else {
+            reportInvalidMovementSpeed();
+          }
         }
         broadcastConfigItem("speed", config.defaultSpeed);
       });

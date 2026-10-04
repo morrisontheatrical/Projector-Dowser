@@ -17,12 +17,29 @@ The Projector Dowser is a custom-built theatrical automation device that:
 |-----------|---------------|
 | **Microcontroller** | Arduino Nano Every |
 | **Servo Motor** | Standard 180° servo (e.g., SG90) |
-| **Ethernet** | W5500 Ethernet shield (CS pin 10) |
+| **Ethernet** | W5500 chip/module wired over SPI (CS pin 10) |
 | **IR Receiver** | 38kHz IR receiver module (pin 5) |
 | **Button** | Tactile pushbutton (pin 2) |
 | **LED** | Status indicator (pin 4) |
 | **Power** | 5V dedicated supply (servo), isolated from Arduino USB |
 | **Umbilical** | 50-foot XLR cable (PWM signal + ground) |
+
+### W5500 Wiring
+
+The W5500 is wired to the Arduino; this project does not use an Ethernet shield. Connect the W5500 signals to the Nano Every (or the corresponding SPI pins on the target board):
+
+| W5500 signal | Arduino connection |
+|--------------|--------------------|
+| SCSn / CS | D10 (chip select; configured in firmware) |
+| SCLK | D13 / SCK |
+| MOSI / SI | D11 / MOSI |
+| MISO / SO | D12 / MISO |
+| VDD | Regulated 3.3V supply |
+| GND | GND (common ground) |
+| RSTn | Hold high or connect to a reset circuit; firmware does not assign a reset pin |
+| INTn | Not used by this firmware; leave unconnected if unused |
+
+The W5500 IC requires 3.3V power. Check the specific board’s circuitry and pin-voltage requirements before wiring it. If using the bare IC rather than a module, it also needs the supporting clock, decoupling, and Ethernet interface circuitry from the WIZnet reference design; the IC alone is not a complete Ethernet interface.
 
 ### Power Architecture
 
@@ -282,7 +299,7 @@ Install via Arduino IDE Library Manager:
 ## Getting Started
 
 ### 1. Hardware Setup
-- Assemble Arduino Nano Every + W5500 Ethernet shield
+- Wire the W5500 to the Arduino SPI pins as shown in [W5500 Wiring](#w5500-wiring)
 - Connect servo to pin 3 (PWM signal)
 - Connect IR receiver to pin 5
 - Connect button to pin 2

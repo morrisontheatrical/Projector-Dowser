@@ -6,7 +6,6 @@
 #include <Servo.h>
 #include <avr/wdt.h>
 #include <ctype.h>
-#include <stdlib.h>
 
 // --- PHYSICAL PIN CONFIGURATION ---
 #define BUTTON_PIN 2
@@ -112,7 +111,7 @@ void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
 bool isValidFadeTime(int fadeTimeMs);
 bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs);
-bool convertFadeTimeSeconds(double seconds, uint16_t& fadeTimeMs);
+bool convertFadeTimeSeconds(float seconds, uint16_t& fadeTimeMs);
 void broadcastFadeTimeConfig();
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
@@ -254,7 +253,8 @@ void updateServo() {
       currentPresetName = "Closed (Down)";
     } else {
       static char dynamicLabel[24];
-      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), currentPos);
+      strcpy_P(dynamicLabel, PSTR("Angle: "));
+      itoa(currentPos, dynamicLabel + 7, 10);
       currentPresetName = dynamicLabel;
     }
 
@@ -409,7 +409,8 @@ void broadcastCompanionState() {
 // Helper to broadcast a single integer configuration item
 void broadcastConfigItem(const char* subPath, int value) {
   char fullPath[50];
-  snprintf(fullPath, sizeof(fullPath), "/dowser/config/%s", subPath);
+  strcpy_P(fullPath, PSTR("/dowser/config/"));
+  strcat(fullPath, subPath);
 
   OSCMessage msg(fullPath);
   msg.add(value);
@@ -921,18 +922,53 @@ bool isValidFadeTime(int fadeTimeMs) {
   return fadeTimeMs >= MIN_FADE_TIME_MS && fadeTimeMs <= MAX_FADE_TIME_MS;
 }
 
-bool convertFadeTimeSeconds(double seconds, uint16_t& fadeTimeMs) {
-  if (!(seconds >= 1.0 && seconds <= 60.0)) return false;
-  fadeTimeMs = (uint16_t)(seconds * 1000.0 + 0.5);
+bool convertFadeTimeSeconds(float seconds, uint16_t& fadeTimeMs) {
+  if (!(seconds >= 1.0f && seconds <= 60.0f)) return false;
+  fadeTimeMs = (uint16_t)(seconds * 1000.0f + 0.5f);
   return true;
 }
 
 bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
-  char* end;
-  double seconds = strtod(value, &end);
-  if (end == value) return false;
-  while (*end && isspace((unsigned char)*end)) end++;
-  return *end == '\0' && convertFadeTimeSeconds(seconds, fadeTimeMs);
+  while (isspace((unsigned char)*value)) value++;
+  if (*value == '+') value++;
+
+  unsigned int wholeSeconds = 0;
+  bool hasDigit = false;
+  while (isdigit((unsigned char)*value)) {
+    hasDigit = true;
+    wholeSeconds = wholeSeconds * 10 + (unsigned int)(*value++ - '0');
+    if (wholeSeconds > 60) return false;
+  }
+
+  unsigned int fractionalMs = 0;
+  uint16_t fractionalPlace = 100;
+  bool roundUp = false;
+  bool roundingDigitSeen = false;
+  bool hasNonZeroFraction = false;
+  if (*value == '.') {
+    value++;
+    while (isdigit((unsigned char)*value)) {
+      hasDigit = true;
+      if (*value != '0') hasNonZeroFraction = true;
+      if (fractionalPlace > 0) {
+        fractionalMs += (unsigned int)(*value - '0') * fractionalPlace;
+        fractionalPlace /= 10;
+      } else if (!roundingDigitSeen) {
+        roundUp = *value >= '5';
+        roundingDigitSeen = true;
+      }
+      value++;
+    }
+  }
+
+  while (isspace((unsigned char)*value)) value++;
+  if (!hasDigit || *value != '\0' || wholeSeconds < 1 ||
+      (wholeSeconds == 60 && hasNonZeroFraction)) return false;
+
+  unsigned int totalMs = wholeSeconds * 1000 + fractionalMs + (roundUp ? 1 : 0);
+  if (!isValidFadeTime(totalMs)) return false;
+  fadeTimeMs = (uint16_t)totalMs;
+  return true;
 }
 
 void handleCommonConsoleCommands(char* input, Print& output) {
@@ -995,7 +1031,12 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(currentPos);
     output.println(F(" deg"));
     output.print(F("Default Fade  : "));
-    output.print((float)config.defaultFadeTimeMs / 1000.0f, 3);
+    output.print(config.defaultFadeTimeMs / 1000);
+    output.print('.');
+    uint16_t fractionalMs = config.defaultFadeTimeMs % 1000;
+    if (fractionalMs < 100) output.print('0');
+    if (fractionalMs < 10) output.print('0');
+    output.print(fractionalMs);
     output.println(F(" s"));
     return;
   }

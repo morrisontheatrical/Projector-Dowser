@@ -989,7 +989,28 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-    output.println(F("Keys: down, up, dnbound, upbound, default, fade, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
+#if defined(__AVR__)
+    output.println(F("<angle>, up, down, show, save, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
+#else
+    output.println(F("Commands:"));
+    output.println(F("  <angle>        move to angle, e.g. 90"));
+    output.println(F("  up / down      move to the saved up/down preset"));
+    output.println(F("  show           print current settings"));
+    output.println(F("  save           write settings to EEPROM and reboot"));
+    output.println(F("  key=value      change a setting (staged until save):"));
+    output.println(F("    down, up, default      angles, e.g. up=120"));
+    output.println(F("    dnbound, upbound       limits 0-180"));
+    output.println(F("    fade                   seconds 1-60, e.g. fade=2.5"));
+    output.println(F("    localport, targetport[0-2]"));
+    output.println(F("    static (0/1), telemetry, heartbeat (0/1)"));
+    output.println(F("    ip, targetip           e.g. ip=192.168.1.50"));
+#endif
+    return;
+  }
+
+  if (strcasecmp(input, "up") == 0 || strcasecmp(input, "down") == 0) {
+    setMovementTargetAtDefaultFadeTime((input[0] == 'u' || input[0] == 'U') ? config.posUp : config.posDown);
+    dispatchMessage(source, F("Move -> "), targetPos);
     return;
   }
 
@@ -1140,7 +1161,11 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
       setMovementTargetAtDefaultFadeTime(parsedVal);
       dispatchMessage(source, F("Move -> "), targetPos);
+    } else {
+      output.println(F("Error: Angle out of range"));
     }
+  } else {
+    output.println(F("Unknown command. Type help (use key=value, e.g. up=120)"));
   }
 }
 

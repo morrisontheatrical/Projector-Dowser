@@ -57,7 +57,7 @@ const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
 const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
 const unsigned long SPEED_PERCENT_SCALE = 100UL;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
-// Limits each command step to 1°; a 20 ms loop interval can reduce 100% motion to about 50°/s.
+// A 20 ms loop interval reduces effective motion to about 45°/s at 100% (about 15°/s at 33%).
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 5000UL;
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /

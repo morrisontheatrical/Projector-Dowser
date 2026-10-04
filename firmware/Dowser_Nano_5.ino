@@ -5,6 +5,7 @@
 #include <EEPROM.h>
 #include <Servo.h>
 #include <avr/wdt.h>
+#include <stdlib.h>
 
 // --- PHYSICAL PIN CONFIGURATION ---
 #define BUTTON_PIN 2
@@ -444,7 +445,6 @@ void broadcastAllConfigSettings() {
   broadcastConfigItem("telemetry", config.telemetryMode);
   delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
-  delay(20);
   delay(20);
   broadcastFadeTime();
 }
@@ -1022,7 +1022,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     uint16_t fadeTimeMs;
     if (parseFadeTimeSeconds(input + 5, fadeTimeMs)) {
       config.defaultFadeTimeMs = fadeTimeMs;
-      dispatchMessage(source, F("Set Default Fade -> "), fadeTimeMs / 1000);
+      dispatchMessage(source, F("Set Default Fade (ms) -> "), fadeTimeMs);
     } else {
       output.println(F("Error: Fade must be 0.0-60.0 seconds"));
     }

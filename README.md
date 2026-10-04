@@ -44,7 +44,7 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 | `/dowser/down` | optional `int speed` | Move to the "down" preset at the default speed or the supplied one-move speed |
 | `/dowser/angle` | `int` or `float` angle, optional `int speed` | Move to a specific angle (degrees), optionally overriding speed for this move |
 | `/dowser/query` | — | Request immediate state broadcast |
-| `/dowser/reset` | — | Move to default position |
+| `/dowser/reset` | optional `int speed` | Move to default position, optionally overriding speed for this move |
 
 #### Configuration (GET/SET REST-style)
 | Endpoint | Args | GET Response | SET Behavior |
@@ -108,6 +108,7 @@ Fixed Target IP    : 10.0.0.29 (Companion fallback)
 Heartbeat          : Enabled (4000ms interval)
 Servo Positions    : Down=10°, Up=170°
 Hard Bounds        : 7° - 173°
+Default Speed      : 33% of 180°/s commanded slew rate
 IR Presets         : [0-4]=10°, [5]=125°, [6-9]=170°
 ```
 

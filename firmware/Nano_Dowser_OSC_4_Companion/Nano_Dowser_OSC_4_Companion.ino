@@ -483,7 +483,7 @@ void processIncomingOSC() {
       });
 
       msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
-        if (msg.size() > 0 && msg.isInt(0)) {
+        if (msg.size() == 1 && msg.isInt(0)) {
           int val = msg.getInt(0);
           if (val >= 1 && val <= 100) config.defaultSpeed = (uint8_t)val;
         }

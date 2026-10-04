@@ -53,12 +53,14 @@ bool configLoadedSuccessfully = false;
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t DEFAULT_SPEED = 33;
+const uint8_t MIN_SPEED_PERCENT = 1;
+const uint8_t MAX_SPEED_PERCENT = 100;
 const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
 const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
-const unsigned long SPEED_PERCENT_SCALE = 100UL;
+const unsigned long SPEED_PERCENT_SCALE = MAX_SPEED_PERCENT;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
-// A 20 ms loop interval reduces effective motion to about 45°/s at 100% (about 15°/s at 33%).
-const unsigned long MAX_MOVEMENT_ELAPSED_US = 5000UL;
+// Covers the common 20 ms loop interval so commanded speed remains a percentage of 180°/s.
+const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
     (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
@@ -66,14 +68,14 @@ static_assert((MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) %
                   (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND) == 0,
               "Motion credit scales must yield an integral rate");
 static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
-                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * 100ULL +
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT +
                   MOVEMENT_CREDIT_PER_DEGREE - 1 <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
 static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
-                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * 100ULL +
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT +
                   MOVEMENT_CREDIT_PER_DEGREE - 1 <
-                  2ULL * MOVEMENT_CREDIT_PER_DEGREE,
-              "A single motion update must advance at most one degree");
+                  5ULL * MOVEMENT_CREDIT_PER_DEGREE,
+              "A single motion update must advance at most four degrees");
 
 int down;
 int up;
@@ -97,7 +99,7 @@ const unsigned long TELNET_TIMEOUT = 120000;
 unsigned long lastTelemetryTime = 0;
 int lastKnownPos = -999;
 
-int lastReportedTarget = -1;
+int lastReportedPos = -1;
 const char* currentPresetName = "System Boot";
 
 int ledState = HIGH;
@@ -114,6 +116,7 @@ bool pauseMV = false;
 // Forward declarations
 void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
+bool isValidSpeed(int speed);
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
@@ -241,7 +244,7 @@ void updateServo() {
     movementCredit = 0;
   }
 
-  if (currentPos != lastReportedTarget) {
+  if (currentPos != lastReportedPos) {
     if (currentPos == up) {
       currentPresetName = "Open (Up)";
     } else if (currentPos == down) {
@@ -254,7 +257,7 @@ void updateServo() {
 
     // Instantly push updates to Companion on mechanical change
     broadcastCompanionState();
-    lastReportedTarget = currentPos;
+    lastReportedPos = currentPos;
   }
 }
 
@@ -281,7 +284,7 @@ bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
   if (msg.size() != argumentIndex + 1) return false;
   if (!msg.isInt(argumentIndex)) return false;
   int value = msg.getInt(argumentIndex);
-  if (value < 1 || value > 100) return false;
+  if (!isValidSpeed(value)) return false;
   speed = (uint8_t)value;
   return true;
 }
@@ -549,8 +552,7 @@ void processIncomingOSC() {
 
       msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
         if (msg.size() > 0) {
-          if (msg.size() == 1 && msg.isInt(0) &&
-              msg.getInt(0) >= 1 && msg.getInt(0) <= 100) {
+          if (msg.size() == 1 && msg.isInt(0) && isValidSpeed(msg.getInt(0))) {
             config.defaultSpeed = (uint8_t)msg.getInt(0);
           } else {
             reportInvalidMovementSpeed();
@@ -803,7 +805,7 @@ void loadConfiguration() {
     uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     memcpy(config.irPresets, defaultIR, 10);
     EEPROM.put(0, config);
-  } else if (config.defaultSpeed < 1 || config.defaultSpeed > 100) {
+  } else if (!isValidSpeed(config.defaultSpeed)) {
     config.defaultSpeed = DEFAULT_SPEED;
     EEPROM.put(0, config);
   }
@@ -864,6 +866,10 @@ bool parseKeyValue(const char* input, const char* key, int& outValue) {
     return true;
   }
   return false;
+}
+
+bool isValidSpeed(int speed) {
+  return speed >= MIN_SPEED_PERCENT && speed <= MAX_SPEED_PERCENT;
 }
 
 void handleCommonConsoleCommands(char* input, Print& output) {
@@ -982,7 +988,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       dispatchMessage(source, F("Set Boot Default -> "), val);
     }
   } else if (parseKeyValue(input, "speed", val)) {
-    if (val >= 1 && val <= 100) {
+    if (isValidSpeed(val)) {
       config.defaultSpeed = (uint8_t)val;
       dispatchMessage(source, F("Set Default Speed -> "), val);
     } else {

@@ -57,7 +57,7 @@ const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
 const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
 const unsigned long SPEED_PERCENT_SCALE = 100UL;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
-const unsigned long MAX_MOVEMENT_ELAPSED_US = 1000000UL;
+const unsigned long MAX_MOVEMENT_ELAPSED_US = 5000UL;
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
     (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
@@ -68,6 +68,11 @@ static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
                       MOVEMENT_CREDIT_PER_US_PER_PERCENT * 100ULL +
                   MOVEMENT_CREDIT_PER_DEGREE - 1 <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
+static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * 100ULL +
+                  MOVEMENT_CREDIT_PER_DEGREE - 1 <
+                  2ULL * MOVEMENT_CREDIT_PER_DEGREE,
+              "A single motion update must advance at most one degree");
 
 int down;
 int up;
@@ -214,7 +219,7 @@ void updateServo() {
   unsigned long now = micros();
   unsigned long elapsed = now - lastMoveUpdateMicros;
   lastMoveUpdateMicros = now;
-  // Time beyond this cap is discarded after long blocking operations to keep 32-bit math safe.
+  // Discard excess elapsed time after blocking operations rather than catching up in a large jump.
   if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
   if (currentPos != targetPos) {

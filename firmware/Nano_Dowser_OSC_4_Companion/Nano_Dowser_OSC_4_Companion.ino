@@ -38,11 +38,44 @@ struct DeviceConfiguration {
   uint8_t upBound;
   uint8_t defaultPos;
   uint8_t irPresets[10];
+  // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
+  uint8_t defaultSpeed;
 };
 
 int targetPos;
+int currentPos;
 int savedTargetPrePause;
+uint8_t activeMoveSpeed;
+unsigned long lastMoveUpdateMicros = 0;
+unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
+
+const uint8_t EEPROM_MAGIC_V1 = 0x53;
+const uint8_t EEPROM_MAGIC_V2 = 0x55;
+const uint8_t DEFAULT_SPEED = 33;
+const uint8_t MIN_SPEED_PERCENT = 1;
+const uint8_t MAX_SPEED_PERCENT = 100;
+const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
+const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
+const unsigned long SPEED_PERCENT_SCALE = MAX_SPEED_PERCENT;
+const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
+// Covers the common 20 ms loop interval so commanded speed remains a percentage of 180°/s.
+const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
+const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
+    (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
+    (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
+static_assert((MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) %
+                  (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND) == 0,
+              "Motion credit scales must yield an integral rate");
+static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT +
+                  MOVEMENT_CREDIT_PER_DEGREE - 1 <= 0xFFFFFFFFULL,
+              "Motion credit update must fit in unsigned long");
+static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT +
+                  MOVEMENT_CREDIT_PER_DEGREE - 1 <
+                  5ULL * MOVEMENT_CREDIT_PER_DEGREE,
+              "A single motion update must advance at most four degrees");
 
 int down;
 int up;
@@ -66,7 +99,7 @@ const unsigned long TELNET_TIMEOUT = 120000;
 unsigned long lastTelemetryTime = 0;
 int lastKnownPos = -999;
 
-int lastReportedTarget = -1;
+int lastReportedPos = -1;
 const char* currentPresetName = "System Boot";
 
 int ledState = HIGH;
@@ -83,6 +116,7 @@ bool pauseMV = false;
 // Forward declarations
 void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
+bool isValidSpeed(int speed);
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
@@ -94,6 +128,13 @@ void processSerialConsole();
 void processPhysicalButton();
 void processIRInput();
 void updateServo();
+void setMovementTarget(int target, uint8_t speed);
+void setMovementTargetAtDefaultSpeed(int target);
+bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex);
+void reportInvalidMovementAngle();
+void reportInvalidMovementSpeed();
+void sendOSCError(const char* path, const char* message);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
@@ -122,8 +163,11 @@ void setup() {
   telnetServer.begin();
 
   myservo.attach(SERVO_PIN);
-  myservo.write(down);
+  currentPos = down;
   targetPos = down;
+  activeMoveSpeed = config.defaultSpeed;
+  myservo.write(currentPos);
+  lastMoveUpdateMicros = micros();
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -142,9 +186,9 @@ void loop() {
   if (currentMillis - lastTelemetryTime >= 50) {
 
     // Condition A: The mechanism is in transit (live update)
-    if (targetPos != lastKnownPos) {
+    if (currentPos != lastKnownPos) {
       broadcastCompanionState();
-      lastKnownPos = targetPos;
+      lastKnownPos = currentPos;
       lastTelemetryTime = currentMillis;  // Reset frame clock
     }
     // Condition B: Mechanism is static, send a 1-second background heartbeat
@@ -176,35 +220,113 @@ void updateServo() {
     targetPos = dnBound + 1;
   }
 
-  myservo.write(targetPos);
+  unsigned long now = micros();
+  unsigned long elapsed = now - lastMoveUpdateMicros;
+  lastMoveUpdateMicros = now;
+  // Discard excess elapsed time after blocking operations rather than catching up in a large jump.
+  if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
-  if (targetPos != lastReportedTarget) {
-    if (targetPos == up) {
+  if (currentPos != targetPos) {
+    // Credit stays below one degree after modulo and is carried through retargets.
+    movementCredit += elapsed * MOVEMENT_CREDIT_PER_US_PER_PERCENT * activeMoveSpeed;
+    unsigned long steps = movementCredit / MOVEMENT_CREDIT_PER_DEGREE;
+    movementCredit %= MOVEMENT_CREDIT_PER_DEGREE;
+    int distance = abs(targetPos - currentPos);
+    if (steps > (unsigned long)distance) {
+      steps = distance;
+      movementCredit = 0;
+    }
+    if (steps > 0) {
+      currentPos += (targetPos > currentPos) ? (int)steps : -(int)steps;
+      myservo.write(currentPos);
+    }
+  } else {
+    movementCredit = 0;
+  }
+
+  if (currentPos != lastReportedPos) {
+    if (currentPos == up) {
       currentPresetName = "Open (Up)";
-    } else if (targetPos == down) {
+    } else if (currentPos == down) {
       currentPresetName = "Closed (Down)";
     } else {
       static char dynamicLabel[24];
-      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), targetPos);
+      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), currentPos);
       currentPresetName = dynamicLabel;
     }
 
     // Instantly push updates to Companion on mechanical change
     broadcastCompanionState();
-    lastReportedTarget = targetPos;
+    lastReportedPos = currentPos;
   }
+}
+
+void setMovementTarget(int target, uint8_t speed) {
+  if (target > upBound) {
+    targetPos = upBound - 1;
+  } else if (target < dnBound) {
+    targetPos = dnBound + 1;
+  } else {
+    targetPos = target;
+  }
+  activeMoveSpeed = speed;
+}
+
+void setMovementTargetAtDefaultSpeed(int target) {
+  setMovementTarget(target, config.defaultSpeed);
+}
+
+bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
+  if (msg.size() == argumentIndex) {
+    speed = config.defaultSpeed;
+    return true;
+  }
+  if (msg.size() != argumentIndex + 1) return false;
+  if (!msg.isInt(argumentIndex)) return false;
+  int value = msg.getInt(argumentIndex);
+  if (!isValidSpeed(value)) return false;
+  speed = (uint8_t)value;
+  return true;
+}
+
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex) {
+  uint8_t speed;
+  if (getMovementSpeed(msg, speedArgumentIndex, speed)) {
+    setMovementTarget(target, speed);
+  } else {
+    reportInvalidMovementSpeed();
+  }
+}
+
+void sendOSCError(const char* path, const char* message) {
+  Serial.println(message);
+  IPAddress senderIP = Udp.remoteIP();
+  unsigned int senderPort = Udp.remotePort();
+  OSCMessage error(path);
+  error.add(message);
+  Udp.beginPacket(senderIP, senderPort);
+  error.send(Udp);
+  Udp.endPacket();
+}
+
+void reportInvalidMovementSpeed() {
+  sendOSCError("/dowser/error/speed", "Speed must be an integer from 1-100");
+}
+
+void reportInvalidMovementAngle() {
+  sendOSCError("/dowser/error/angle", "Angle must be a number within configured bounds");
 }
 
 /*/ --- NEW COMPANION OSC FEEDBACK ENGINE ---
 void broadcastCompanionState() {
   // 1. Prepare Companion native tracking payloads
-  OSCMessage msgAngle("/dowser/state/angle");   msgAngle.add(targetPos);
-  OSCMessage msgUp("/dowser/state/isUp");       msgUp.add(targetPos == up ? 1 : 0);
-  OSCMessage msgDown("/dowser/state/isDown");   msgDown.add(targetPos == down ? 1 : 0);
+  OSCMessage msgAngle("/dowser/state/angle");   msgAngle.add(currentPos);
+  OSCMessage msgUp("/dowser/state/isUp");       msgUp.add(currentPos == up ? 1 : 0);
+  OSCMessage msgDown("/dowser/state/isDown");   msgDown.add(currentPos == down ? 1 : 0);
 
   // 2. Prepare QLab note payload (Converts integer position to string)
   char noteBuffer[16];
-  itoa(targetPos, noteBuffer, 10); // Converts integer to string character array cleanly
+  itoa(currentPos, noteBuffer, 10); // Converts integer to string character array cleanly
   OSCMessage msgQLab("/cue/DOWSER_STATUS/notes");
   msgQLab.add(noteBuffer);
   OSCMessage msgQLab1("/cue/DOWSER_STATUS/name");
@@ -232,7 +354,7 @@ void broadcastCompanionState() {
 void broadcastCompanionState() {
   // 1. Prepare QLab workspace payloads
   char noteBuffer[16];
-  itoa(targetPos, noteBuffer, 10);
+  itoa(currentPos, noteBuffer, 10);
   OSCMessage msgQLab("/cue/DOWSER_STATUS/notes");
   msgQLab.add(noteBuffer);
   OSCMessage msgQLab1("/cue/DOWSER_STATUS/name");
@@ -240,11 +362,11 @@ void broadcastCompanionState() {
 
   // 2. Prepare distinct Companion telemetry payloads
   OSCMessage msgUp("/dowser/state/isUp");
-  msgUp.add(targetPos == config.posUp ? 1 : 0);
+  msgUp.add(currentPos == config.posUp ? 1 : 0);
   OSCMessage msgDown("/dowser/state/isDown");
-  msgDown.add(targetPos == config.posDown ? 1 : 0);
+  msgDown.add(currentPos == config.posDown ? 1 : 0);
   OSCMessage msgAngle("/dowser/state/angle");
-  msgAngle.add(targetPos);
+  msgAngle.add(currentPos);
 
   // 3. Iterate across active port allocations
   for (uint8_t i = 0; i < 3; i++) {
@@ -308,6 +430,8 @@ void broadcastAllConfigSettings() {
   broadcastConfigItem("static", config.preferStatic);        delay(20);
   broadcastConfigItem("telemetry", config.telemetryMode);    delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
+  delay(20);
+  broadcastConfigItem("speed", config.defaultSpeed);
 }
 
 void processIncomingOSC() {
@@ -322,22 +446,29 @@ void processIncomingOSC() {
     if (!msgIn.hasError()) {
       // --- CORE OPERATIONAL ROUTING ---
       msgIn.route("/dowser/up", [](OSCMessage& msg, int offset) {
-        targetPos = config.posUp;
+        setMovementTargetFromOSC(msg, config.posUp, 0);
       });
       msgIn.route("/dowser/down", [](OSCMessage& msg, int offset) {
-        targetPos = config.posDown;
+        setMovementTargetFromOSC(msg, config.posDown, 0);
       });
       msgIn.route("/dowser/angle", [](OSCMessage& msg, int offset) {
-        if (msg.size() > 0 && (msg.isInt(0) || msg.isFloat(0))) {
-          int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
-          if (angle >= config.dnBound && angle <= config.upBound) { targetPos = angle; }
+        if (msg.size() == 0 || (!msg.isInt(0) && !msg.isFloat(0))) {
+          reportInvalidMovementAngle();
+          return;
         }
+        float requestedAngle = msg.isInt(0) ? msg.getInt(0) : msg.getFloat(0);
+        if (!(requestedAngle >= config.dnBound && requestedAngle <= config.upBound)) {
+          reportInvalidMovementAngle();
+          return;
+        }
+        int angle = (int)requestedAngle;
+        setMovementTargetFromOSC(msg, angle, 1);
       });
       msgIn.route("/dowser/query", [](OSCMessage& msg, int offset) {
         broadcastCompanionState();
       });
       msgIn.route("/dowser/reset", [](OSCMessage& msg, int offset) {
-        targetPos = config.posDown;
+        setMovementTargetFromOSC(msg, config.posDown, 0);
       });
 
       // --- CONFIGURATION MANAGEMENT LAYER (GET / SET) ---
@@ -417,6 +548,17 @@ void processIncomingOSC() {
           config.heartbeatEnabled = (msg.getInt(0) == 1) ? 1 : 0;
         }
         broadcastConfigItem("heartbeat", config.heartbeatEnabled);
+      });
+
+      msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
+        if (msg.size() > 0) {
+          if (msg.size() == 1 && msg.isInt(0) && isValidSpeed(msg.getInt(0))) {
+            config.defaultSpeed = (uint8_t)msg.getInt(0);
+          } else {
+            reportInvalidMovementSpeed();
+          }
+        }
+        broadcastConfigItem("speed", config.defaultSpeed);
       });
 
       // Network Infrastructure Ports
@@ -551,7 +693,7 @@ void processPhysicalButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == 1) {
-        targetPos = (targetPos == down) ? up : down;
+        setMovementTargetAtDefaultSpeed((targetPos == down) ? up : down);
         ledState = LOW;
       } else {
         ledState = HIGH;
@@ -574,22 +716,22 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: targetPos = myservo.read() + 1; break;
-    case 0xBB44FF00: targetPos = myservo.read() - 5; break;
+    case 0xB946FF00: setMovementTargetAtDefaultSpeed(currentPos + 1); break;
+    case 0xBB44FF00: setMovementTargetAtDefaultSpeed(currentPos - 5); break;
     case 0xBF40FF00:
       if (pauseMV) {
-        targetPos = savedTargetPrePause;
+        setMovementTargetAtDefaultSpeed(savedTargetPrePause);
         pauseMV = false;
       } else {
         savedTargetPrePause = targetPos;
-        targetPos = myservo.read();
+        setMovementTargetAtDefaultSpeed(currentPos);
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: targetPos = myservo.read() + 5; break;
-    case 0xF807FF00: targetPos = down; break;
-    case 0xEA15FF00: targetPos = myservo.read() - 1; break;
-    case 0xF609FF00: targetPos = up; break;
+    case 0xBC43FF00: setMovementTargetAtDefaultSpeed(currentPos + 5); break;
+    case 0xF807FF00: setMovementTargetAtDefaultSpeed(down); break;
+    case 0xEA15FF00: setMovementTargetAtDefaultSpeed(currentPos - 1); break;
+    case 0xF609FF00: setMovementTargetAtDefaultSpeed(up); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
     case 0xF30CFF00: handleIRPreset(1); break;
@@ -611,17 +753,25 @@ void handleIRPreset(int num) {
       presetMode = false;
     } else {
       presetMode = true;
-      config.irPresets[num] = (uint8_t)myservo.read();
+      config.irPresets[num] = (uint8_t)currentPos;
     }
   } else {
-    targetPos = config.irPresets[num];
+    setMovementTargetAtDefaultSpeed(config.irPresets[num]);
   }
 }
 
 void loadConfiguration() {
   EEPROM.get(0, config);
-  if (config.magicNumber != 0x53) {
-    config.magicNumber = 0x53;
+  if (config.magicNumber == EEPROM_MAGIC_V1) {
+    // The V1 fields remain a byte-identical prefix; initialize every appended field before writing V2.
+    config.magicNumber = EEPROM_MAGIC_V2;
+    config.defaultSpeed = DEFAULT_SPEED;
+    EEPROM.put(0, config);
+    return;
+  }
+
+  if (config.magicNumber != EEPROM_MAGIC_V2) {
+    config.magicNumber = EEPROM_MAGIC_V2;
     config.preferStatic = 1;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
@@ -651,8 +801,12 @@ void loadConfiguration() {
     config.dnBound = 7;
     config.upBound = 173;
     config.defaultPos = 10;
+    config.defaultSpeed = DEFAULT_SPEED;
     uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     memcpy(config.irPresets, defaultIR, 10);
+    EEPROM.put(0, config);
+  } else if (!isValidSpeed(config.defaultSpeed)) {
+    config.defaultSpeed = DEFAULT_SPEED;
     EEPROM.put(0, config);
   }
 }
@@ -714,12 +868,16 @@ bool parseKeyValue(const char* input, const char* key, int& outValue) {
   return false;
 }
 
+bool isValidSpeed(int speed) {
+  return speed >= MIN_SPEED_PERCENT && speed <= MAX_SPEED_PERCENT;
+}
+
 void handleCommonConsoleCommands(char* input, Print& output) {
   const char* source = (&output == &Serial) ? "SERIAL" : "TELNET";
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-    output.println(F("Keys: down, up, dnbound, upbound, default, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
+    output.println(F("Keys: down, up, dnbound, upbound, default, speed, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
     return;
   }
 
@@ -770,6 +928,12 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(F("Active Target : "));
     output.print(targetPos);
     output.println(F(" deg"));
+    output.print(F("Current Position: "));
+    output.print(currentPos);
+    output.println(F(" deg"));
+    output.print(F("Default Speed : "));
+    output.print(config.defaultSpeed);
+    output.println(F("%"));
     return;
   }
 
@@ -823,6 +987,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultPos = val;
       dispatchMessage(source, F("Set Boot Default -> "), val);
     }
+  } else if (parseKeyValue(input, "speed", val)) {
+    if (isValidSpeed(val)) {
+      config.defaultSpeed = (uint8_t)val;
+      dispatchMessage(source, F("Set Default Speed -> "), val);
+    } else {
+      dispatchMessage(source, F("Error: Speed must be 1-100%"));
+    }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;
     dispatchMessage(source, F("Set Local Port -> "), val);
@@ -849,7 +1020,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   } else if (isdigit(input[0])) {
     int parsedVal = atoi(input);
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
-      targetPos = parsedVal;
+      setMovementTargetAtDefaultSpeed(parsedVal);
       dispatchMessage(source, F("Move -> "), targetPos);
     }
   }

@@ -11,7 +11,7 @@ For the currently documented firmware, see
 | Sketch | Features | Important differences and limitations |
 | --- | --- | --- |
 | [`Nano_Ethernet.ino`](Nano_Ethernet.ino) | Early W5500/UDP OSC receiver with a `/macro/trigger` route and an OSC status-send helper. | Network-only test: no servo or local controls. Uses fixed IP, ports, and target host. |
-| [`Nano_Ethernet_Servo.ino`](Nano_Ethernet_Servo.ino) | Adds `/dowser/up`, `/down`, `/reset`, and `/angle` OSC routes and sends QLab cue name/notes feedback. | Tracks a simulated angle and preset; servo writes are commented out and no Servo library is included. Uses fixed network settings. |
+| [`Nano_Ethernet_Servo.ino`](Nano_Ethernet_Servo.ino) | Adds `/dowser/up`, `/dowser/down`, `/dowser/reset`, and `/dowser/angle` OSC routes and sends QLab cue name/notes feedback. | Tracks a simulated angle and preset; servo writes are commented out and no Servo library is included. Uses fixed network settings. |
 | [`Nano_Ethernet_Servo_2.ino`](Nano_Ethernet_Servo_2.ino) | Adds EEPROM-backed network settings, DHCP with static fallback, three telemetry routing modes, heartbeat, serial configuration, save/reboot, and watchdog reset. | The angle/preset is still software state: this sketch has no servo driver or local button/IR control. Configuration is an early single-target-port design. |
 
 ## Local servo prototypes

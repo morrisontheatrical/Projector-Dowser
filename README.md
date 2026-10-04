@@ -40,11 +40,11 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 #### Core Movement
 | Endpoint | Args | Description |
 |----------|------|-------------|
-| `/dowser/up` | optional `int fadeTimeMs` (1000-60000) | Move to the "up" preset using the default fade time or supplied one-move duration |
-| `/dowser/down` | optional `int fadeTimeMs` (1000-60000) | Move to the "down" preset using the default fade time or supplied one-move duration |
-| `/dowser/angle` | `int` or `float` angle, optional `int fadeTimeMs` (1000-60000) | Move to a specific angle (degrees), optionally overriding the fade time |
+| `/dowser/up` | optional `int` or `float` fade seconds (1-60) | Move to the "up" preset using the default fade time or supplied one-move duration |
+| `/dowser/down` | optional `int` or `float` fade seconds (1-60) | Move to the "down" preset using the default fade time or supplied one-move duration |
+| `/dowser/angle` | `int` or `float` angle, optional `int` or `float` fade seconds (1-60) | Move to a specific angle (degrees), optionally overriding the fade time |
 | `/dowser/query` | — | Request immediate state broadcast |
-| `/dowser/reset` | optional `int fadeTimeMs` (1000-60000) | Move to the down preset, optionally overriding the fade time |
+| `/dowser/reset` | optional `int` or `float` fade seconds (1-60) | Move to the down preset, optionally overriding the fade time |
 
 #### Configuration (GET/SET REST-style)
 | Endpoint | Args | GET Response | SET Behavior |
@@ -59,17 +59,17 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 | `/dowser/config/static` | `0\|1` | Broadcasts static IP mode | Enables/disables static IP |
 | `/dowser/config/telemetry` | `0\|1\|2` | Broadcasts telemetry mode | Sets telemetry routing mode |
 | `/dowser/config/heartbeat` | `0\|1` | Broadcasts heartbeat state | Enables/disables heartbeat |
-| `/dowser/config/fade` | `int` (1000-60000 ms) | Broadcasts default fade time | Sets persistent default move duration |
+| `/dowser/config/fade` | `int` or `float` (1-60 seconds) | Broadcasts default fade time | Sets persistent default move duration |
 | `/dowser/config/queryAll` | — | Broadcasts all 13 config fields | N/A (query only) |
 | `/dowser/config/save` | — | N/A | Saves config to EEPROM + reboot |
 
-Fade time is the requested duration for the entire move, in milliseconds. For example, `/dowser/up 2500` fades to the up preset over 2.5 seconds, while `/dowser/angle 90 4000` takes 4 seconds to reach 90°. The actual commanded slew rate scales with the distance to the target, so a shorter move takes the same fade time at a lower rate. Shorter times move faster; longer times may reduce abruptness and noise, but do not guarantee a quieter physical servo. The valid range is 1000-60000 ms. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; elapsed-time catch-up is capped to 20 ms per update after longer delays.
+Fade time is the requested duration for the entire move, in seconds. Integer and decimal values are accepted (for example, `/dowser/up 2.5` fades to the up preset over 2.5 seconds, while `/dowser/angle 90 4.25` takes 4.25 seconds to reach 90°). Times are stored and applied internally to the nearest millisecond. The actual commanded slew rate scales with the distance to the target, so a shorter move takes the requested duration at a lower rate. Shorter times move faster; longer times may reduce abruptness and noise, but do not guarantee a quieter physical servo. The valid range is 1-60 seconds. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; elapsed-time catch-up is capped to 20 ms per update after longer delays.
 
 Each move keeps the fade time selected when it started. Changing `/dowser/config/fade` or `fade=` affects subsequent moves, not one already in progress.
 
-Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer from 1000 to 60000. These arguments replace the former speed percentages, so clients sending a speed argument must be updated to send milliseconds. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the boot position (`config.defaultPos`).
+Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer or float from 1 to 60 seconds. These arguments replace the former speed percentages and millisecond values, so clients sending either must be updated to send seconds. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the boot position (`config.defaultPos`).
 
-Suggested hardware checks: compare short and long fade times, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid fade times (999, 60001, or a non-integer) and out-of-bounds angles return errors without starting a move. Query/set `/dowser/config/fade` with no argument, valid values, and invalid values. Set `fade=4000`, save, and reboot to check persistence; on legacy 0x53/0x55 devices, confirm existing settings remain intact.
+Suggested hardware checks: compare short and long fade times, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid fade times (0.99, 60.01, or a non-numeric value) and out-of-bounds angles return errors without starting a move. Query/set `/dowser/config/fade` with no argument, valid integer and decimal values, and invalid values. Set `fade=4.25`, save, and reboot to check persistence; on legacy 0x53/0x55 devices, confirm existing settings remain intact.
 
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |
@@ -114,7 +114,7 @@ Fixed Target IP    : 10.0.0.29 (Companion fallback)
 Heartbeat          : Enabled (4000ms interval)
 Servo Positions    : Down=10°, Up=170°
 Hard Bounds        : 7° - 173°
-Default Fade Time  : 3000ms per move
+Default Fade Time  : 3.000s per move
 IR Presets         : [0-4]=10°, [5]=125°, [6-9]=170°
 ```
 
@@ -158,7 +158,7 @@ up=170              # Set up position to 170°
 dnbound=5           # Set lower hard limit to 5°
 upbound=175         # Set upper hard limit to 175°
 default=90          # Set boot default to 90°
-fade=3000           # Set default movement fade time (1000-60000 ms)
+fade=3.0            # Set default movement fade time (1-60 seconds)
 localport=8001      # Set listening port
 targetport0=12000   # Set target port 0
 targetport1=53000   # Set target port 1
@@ -264,7 +264,7 @@ struct DeviceConfiguration {
 };
 ```
 
-Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3000 ms default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Valid fade times are 1000-60000 ms.
+Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (1-60), and stored to the nearest millisecond.
 
 ## Dependency Libraries
 

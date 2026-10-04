@@ -5,6 +5,8 @@
 #include <EEPROM.h>
 #include <Servo.h>
 #include <avr/wdt.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 // --- PHYSICAL PIN CONFIGURATION ---
 #define BUTTON_PIN 2
@@ -109,6 +111,9 @@ bool pauseMV = false;
 void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
 bool isValidFadeTime(int fadeTimeMs);
+bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs);
+bool convertFadeTimeSeconds(double seconds, uint16_t& fadeTimeMs);
+void broadcastFadeTimeConfig();
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
@@ -283,11 +288,13 @@ bool getMovementFadeTime(OSCMessage& msg, int argumentIndex, uint16_t& fadeTimeM
     return true;
   }
   if (msg.size() != argumentIndex + 1) return false;
-  if (!msg.isInt(argumentIndex)) return false;
-  int value = msg.getInt(argumentIndex);
-  if (!isValidFadeTime(value)) return false;
-  fadeTimeMs = (uint16_t)value;
-  return true;
+  if (msg.isInt(argumentIndex)) {
+    return convertFadeTimeSeconds(msg.getInt(argumentIndex), fadeTimeMs);
+  }
+  if (msg.isFloat(argumentIndex)) {
+    return convertFadeTimeSeconds(msg.getFloat(argumentIndex), fadeTimeMs);
+  }
+  return false;
 }
 
 void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentIndex) {
@@ -311,7 +318,7 @@ void sendOSCError(const char* path, const char* message) {
 }
 
 void reportInvalidMovementFadeTime() {
-  sendOSCError("/dowser/error/fade", "Fade time must be an integer from 1000-60000 ms");
+  sendOSCError("/dowser/error/fade", "Fade time must be a number from 1-60 seconds");
 }
 
 void reportInvalidMovementAngle() {
@@ -443,7 +450,21 @@ void broadcastAllConfigSettings() {
   delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
   delay(20);
-  broadcastConfigItem("fade", config.defaultFadeTimeMs);
+  broadcastFadeTimeConfig();
+}
+
+void broadcastFadeTimeConfig() {
+  OSCMessage msg("/dowser/config/fade");
+  msg.add((float)config.defaultFadeTimeMs / 1000.0f);
+
+  for (uint8_t i = 0; i < 3; i++) {
+    uint16_t activePort = config.targetPorts[i];
+    if (activePort == 0) continue;
+    Udp.beginPacket(currentTargetIP, activePort);
+    msg.send(Udp);
+    Udp.endPacket();
+  }
+  msg.empty();
 }
 
 void processIncomingOSC() {
@@ -564,13 +585,14 @@ void processIncomingOSC() {
 
       msgIn.route("/dowser/config/fade", [](OSCMessage& msg, int offset) {
         if (msg.size() > 0) {
-          if (msg.size() == 1 && msg.isInt(0) && isValidFadeTime(msg.getInt(0))) {
-            config.defaultFadeTimeMs = (uint16_t)msg.getInt(0);
+          uint16_t fadeTimeMs;
+          if (msg.size() == 1 && getMovementFadeTime(msg, 0, fadeTimeMs)) {
+            config.defaultFadeTimeMs = fadeTimeMs;
           } else {
             reportInvalidMovementFadeTime();
           }
         }
-        broadcastConfigItem("fade", config.defaultFadeTimeMs);
+        broadcastFadeTimeConfig();
       });
 
       // Network Infrastructure Ports
@@ -899,6 +921,20 @@ bool isValidFadeTime(int fadeTimeMs) {
   return fadeTimeMs >= MIN_FADE_TIME_MS && fadeTimeMs <= MAX_FADE_TIME_MS;
 }
 
+bool convertFadeTimeSeconds(double seconds, uint16_t& fadeTimeMs) {
+  if (!(seconds >= 1.0 && seconds <= 60.0)) return false;
+  fadeTimeMs = (uint16_t)(seconds * 1000.0 + 0.5);
+  return true;
+}
+
+bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
+  char* end;
+  double seconds = strtod(value, &end);
+  if (end == value) return false;
+  while (*end && isspace((unsigned char)*end)) end++;
+  return *end == '\0' && convertFadeTimeSeconds(seconds, fadeTimeMs);
+}
+
 void handleCommonConsoleCommands(char* input, Print& output) {
   const char* source = (&output == &Serial) ? "SERIAL" : "TELNET";
   int val;
@@ -959,8 +995,8 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(currentPos);
     output.println(F(" deg"));
     output.print(F("Default Fade  : "));
-    output.print(config.defaultFadeTimeMs);
-    output.println(F(" ms"));
+    output.print((float)config.defaultFadeTimeMs / 1000.0f, 3);
+    output.println(F(" s"));
     return;
   }
 
@@ -1014,12 +1050,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultPos = val;
       dispatchMessage(source, F("Set Boot Default -> "), val);
     }
-  } else if (parseKeyValue(input, "fade", val)) {
-    if (isValidFadeTime(val)) {
-      config.defaultFadeTimeMs = (uint16_t)val;
-      dispatchMessage(source, F("Set Default Fade -> "), val);
+  } else if (strncasecmp(input, "fade=", 5) == 0) {
+    uint16_t fadeTimeMs;
+    if (parseFadeTimeSeconds(input + 5, fadeTimeMs)) {
+      config.defaultFadeTimeMs = fadeTimeMs;
+      dispatchMessage(source, F("Set Default Fade (ms) -> "), fadeTimeMs);
     } else {
-      dispatchMessage(source, F("Error: Fade must be 1000-60000 ms"));
+      dispatchMessage(source, F("Error: Fade must be 1-60 seconds"));
     }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;

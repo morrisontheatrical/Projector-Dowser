@@ -57,6 +57,7 @@ const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
 const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
 const unsigned long SPEED_PERCENT_SCALE = 100UL;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
+const unsigned long MAX_MOVEMENT_ELAPSED_US = 1000000UL;
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
     (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
@@ -201,7 +202,8 @@ void updateServo() {
   unsigned long now = micros();
   unsigned long elapsed = now - lastMoveUpdateMicros;
   lastMoveUpdateMicros = now;
-  if (elapsed > 1000000UL) elapsed = 1000000UL;
+  // Capping elapsed time keeps the 32-bit credit multiplication and addition in range.
+  if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
   if (currentPos != targetPos) {
     movementCredit += elapsed * MOVEMENT_CREDIT_PER_US_PER_PERCENT * activeMoveSpeed;
@@ -238,7 +240,13 @@ void updateServo() {
 }
 
 void setMovementTarget(int target, uint8_t speed) {
-  targetPos = target;
+  if (target > upBound) {
+    targetPos = upBound - 1;
+  } else if (target < dnBound) {
+    targetPos = dnBound + 1;
+  } else {
+    targetPos = target;
+  }
   activeMoveSpeed = speed;
   movementCredit = 0;
   lastMoveUpdateMicros = micros();
@@ -653,8 +661,8 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: setMovementTarget(targetPos + 1, config.defaultSpeed); break;
-    case 0xBB44FF00: setMovementTarget(targetPos - 5, config.defaultSpeed); break;
+    case 0xB946FF00: setMovementTarget(currentPos + 1, config.defaultSpeed); break;
+    case 0xBB44FF00: setMovementTarget(currentPos - 5, config.defaultSpeed); break;
     case 0xBF40FF00:
       if (pauseMV) {
         setMovementTarget(savedTargetPrePause, config.defaultSpeed);
@@ -665,9 +673,9 @@ void translateIRCommand(long IRData) {
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: setMovementTarget(targetPos + 5, config.defaultSpeed); break;
+    case 0xBC43FF00: setMovementTarget(currentPos + 5, config.defaultSpeed); break;
     case 0xF807FF00: setMovementTarget(down, config.defaultSpeed); break;
-    case 0xEA15FF00: setMovementTarget(targetPos - 1, config.defaultSpeed); break;
+    case 0xEA15FF00: setMovementTarget(currentPos - 1, config.defaultSpeed); break;
     case 0xF609FF00: setMovementTarget(up, config.defaultSpeed); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;

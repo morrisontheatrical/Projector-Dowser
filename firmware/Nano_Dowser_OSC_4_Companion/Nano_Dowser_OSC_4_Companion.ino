@@ -58,6 +58,7 @@ const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
 const unsigned long SPEED_PERCENT_SCALE = 100UL;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 1000000UL;
+// These scales divide exactly to 18 credits/us/percent; the capped maximum update plus remainder is < 1.81e9.
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
     (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
@@ -114,6 +115,7 @@ void processIRInput();
 void updateServo();
 void setMovementTarget(int target, uint8_t speed);
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
@@ -265,6 +267,15 @@ bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
   return true;
 }
 
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex) {
+  uint8_t speed;
+  if (getMovementSpeed(msg, speedArgumentIndex, speed)) {
+    setMovementTarget(target, speed);
+  } else {
+    Serial.println(F("Rejected OSC move: speed must be an integer from 1-100"));
+  }
+}
+
 /*/ --- NEW COMPANION OSC FEEDBACK ENGINE ---
 void broadcastCompanionState() {
   // 1. Prepare Companion native tracking payloads
@@ -394,20 +405,16 @@ void processIncomingOSC() {
     if (!msgIn.hasError()) {
       // --- CORE OPERATIONAL ROUTING ---
       msgIn.route("/dowser/up", [](OSCMessage& msg, int offset) {
-        uint8_t speed;
-        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posUp, speed);
+        setMovementTargetFromOSC(msg, config.posUp, 0);
       });
       msgIn.route("/dowser/down", [](OSCMessage& msg, int offset) {
-        uint8_t speed;
-        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posDown, speed);
+        setMovementTargetFromOSC(msg, config.posDown, 0);
       });
       msgIn.route("/dowser/angle", [](OSCMessage& msg, int offset) {
         if (msg.size() > 0 && (msg.isInt(0) || msg.isFloat(0))) {
           int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
-          uint8_t speed;
-          if (angle >= config.dnBound && angle <= config.upBound &&
-              getMovementSpeed(msg, 1, speed)) {
-            setMovementTarget(angle, speed);
+          if (angle >= config.dnBound && angle <= config.upBound) {
+            setMovementTargetFromOSC(msg, angle, 1);
           }
         }
       });
@@ -415,8 +422,7 @@ void processIncomingOSC() {
         broadcastCompanionState();
       });
       msgIn.route("/dowser/reset", [](OSCMessage& msg, int offset) {
-        uint8_t speed;
-        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posDown, speed);
+        setMovementTargetFromOSC(msg, config.posDown, 0);
       });
 
       // --- CONFIGURATION MANAGEMENT LAYER (GET / SET) ---

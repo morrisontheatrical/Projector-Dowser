@@ -39,35 +39,34 @@ struct DeviceConfiguration {
   uint8_t defaultPos;
   uint8_t irPresets[10];
   // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
-  uint8_t defaultSpeed;
+  uint16_t defaultFadeTimeMs;
 };
 
 int targetPos;
 int currentPos;
 int savedTargetPrePause;
-uint8_t activeMoveSpeed;
+uint16_t activeMoveFadeTimeMs;
+uint8_t activeMoveDistance;
 unsigned long lastMoveUpdateMicros = 0;
 unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
 
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
-const uint8_t DEFAULT_SPEED = 33;
-const uint8_t MIN_SPEED_PERCENT = 1;
-const uint8_t MAX_SPEED_PERCENT = 100;
-const unsigned long MAX_SLEW_DEGREES_PER_SECOND = 180UL;
-const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
-const unsigned long SPEED_PERCENT_SCALE = MAX_SPEED_PERCENT;
-const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
-// Covers the common 20 ms loop interval so commanded speed remains a percentage of 180°/s.
+const uint8_t EEPROM_MAGIC_V3 = 0x56;
+const uint16_t DEFAULT_FADE_TIME_MS = 3000;
+const uint16_t MIN_FADE_TIME_MS = 1000;
+const uint16_t MAX_FADE_TIME_MS = 60000;
+const unsigned long MICROSECONDS_PER_MILLISECOND = 1000UL;
+// Covers the common 20 ms loop interval while limiting catch-up after blocking operations.
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
-const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
-  (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) / (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
-static_assert((MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) % (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND) == 0,
-              "Motion credit scales must yield an integral rate");
-static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US * MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT + MOVEMENT_CREDIT_PER_DEGREE - 1 <= 0xFFFFFFFFULL,
+const unsigned long MAX_MOVEMENT_DISTANCE_DEGREES = 180UL;
+static_assert((unsigned long long)MAX_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND +
+                (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES - 1 <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
-static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US * MOVEMENT_CREDIT_PER_US_PER_PERCENT * MAX_SPEED_PERCENT + MOVEMENT_CREDIT_PER_DEGREE - 1 < 5ULL * MOVEMENT_CREDIT_PER_DEGREE,
+static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES +
+                (unsigned long long)MIN_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND - 1 <
+                5ULL * MIN_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND,
               "A single motion update must advance at most four degrees");
 
 int down;
@@ -109,7 +108,7 @@ bool pauseMV = false;
 // Forward declarations
 void handleCommonConsoleCommands(char* input, Print& output);
 bool parseKeyValue(const char* input, const char* key, int& outValue);
-bool isValidSpeed(int speed);
+bool isValidFadeTime(int fadeTimeMs);
 void evaluateTelemetryRouting(IPAddress senderIP, unsigned int senderPort);
 void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
@@ -121,12 +120,12 @@ void processSerialConsole();
 void processPhysicalButton();
 void processIRInput();
 void updateServo();
-void setMovementTarget(int target, uint8_t speed);
-void setMovementTargetAtDefaultSpeed(int target);
-bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
-void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex);
+void setMovementTarget(int target, uint16_t fadeTimeMs);
+void setMovementTargetAtDefaultFadeTime(int target);
+bool getMovementFadeTime(OSCMessage& msg, int argumentIndex, uint16_t& fadeTimeMs);
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentIndex);
 void reportInvalidMovementAngle();
-void reportInvalidMovementSpeed();
+void reportInvalidMovementFadeTime();
 void sendOSCError(const char* path, const char* message);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
@@ -158,7 +157,7 @@ void setup() {
   myservo.attach(SERVO_PIN);
   currentPos = down;
   targetPos = down;
-  activeMoveSpeed = config.defaultSpeed;
+  activeMoveFadeTimeMs = config.defaultFadeTimeMs;
   myservo.write(currentPos);
   lastMoveUpdateMicros = micros();
 
@@ -207,6 +206,7 @@ void loop() {
 }
 
 void updateServo() {
+  int previousTargetPos = targetPos;
   if (targetPos > upBound) {
     targetPos = upBound - 1;
   } else if (targetPos < dnBound) {
@@ -214,16 +214,21 @@ void updateServo() {
   }
 
   unsigned long now = micros();
+  if (targetPos != previousTargetPos) {
+    activeMoveDistance = (uint8_t)abs(targetPos - currentPos);
+    movementCredit = 0;
+    lastMoveUpdateMicros = now;
+  }
   unsigned long elapsed = now - lastMoveUpdateMicros;
   lastMoveUpdateMicros = now;
   // Discard excess elapsed time after blocking operations rather than catching up in a large jump.
   if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
   if (currentPos != targetPos) {
-    // Credit stays below one degree after modulo and is carried through retargets.
-    movementCredit += elapsed * MOVEMENT_CREDIT_PER_US_PER_PERCENT * activeMoveSpeed;
-    unsigned long steps = movementCredit / MOVEMENT_CREDIT_PER_DEGREE;
-    movementCredit %= MOVEMENT_CREDIT_PER_DEGREE;
+    unsigned long fadeDurationUs = (unsigned long)activeMoveFadeTimeMs * MICROSECONDS_PER_MILLISECOND;
+    movementCredit += elapsed * activeMoveDistance;
+    unsigned long steps = movementCredit / fadeDurationUs;
+    movementCredit %= fadeDurationUs;
     int distance = abs(targetPos - currentPos);
     if (steps > (unsigned long)distance) {
       steps = distance;
@@ -254,7 +259,7 @@ void updateServo() {
   }
 }
 
-void setMovementTarget(int target, uint8_t speed) {
+void setMovementTarget(int target, uint16_t fadeTimeMs) {
   if (target > upBound) {
     targetPos = upBound - 1;
   } else if (target < dnBound) {
@@ -262,32 +267,35 @@ void setMovementTarget(int target, uint8_t speed) {
   } else {
     targetPos = target;
   }
-  activeMoveSpeed = speed;
+  activeMoveFadeTimeMs = fadeTimeMs;
+  activeMoveDistance = (uint8_t)abs(targetPos - currentPos);
+  movementCredit = 0;
+  lastMoveUpdateMicros = micros();
 }
 
-void setMovementTargetAtDefaultSpeed(int target) {
-  setMovementTarget(target, config.defaultSpeed);
+void setMovementTargetAtDefaultFadeTime(int target) {
+  setMovementTarget(target, config.defaultFadeTimeMs);
 }
 
-bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
+bool getMovementFadeTime(OSCMessage& msg, int argumentIndex, uint16_t& fadeTimeMs) {
   if (msg.size() == argumentIndex) {
-    speed = config.defaultSpeed;
+    fadeTimeMs = config.defaultFadeTimeMs;
     return true;
   }
   if (msg.size() != argumentIndex + 1) return false;
   if (!msg.isInt(argumentIndex)) return false;
   int value = msg.getInt(argumentIndex);
-  if (!isValidSpeed(value)) return false;
-  speed = (uint8_t)value;
+  if (!isValidFadeTime(value)) return false;
+  fadeTimeMs = (uint16_t)value;
   return true;
 }
 
-void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex) {
-  uint8_t speed;
-  if (getMovementSpeed(msg, speedArgumentIndex, speed)) {
-    setMovementTarget(target, speed);
+void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentIndex) {
+  uint16_t fadeTimeMs;
+  if (getMovementFadeTime(msg, fadeTimeArgumentIndex, fadeTimeMs)) {
+    setMovementTarget(target, fadeTimeMs);
   } else {
-    reportInvalidMovementSpeed();
+    reportInvalidMovementFadeTime();
   }
 }
 
@@ -302,8 +310,8 @@ void sendOSCError(const char* path, const char* message) {
   Udp.endPacket();
 }
 
-void reportInvalidMovementSpeed() {
-  sendOSCError("/dowser/error/speed", "Speed must be an integer from 1-100");
+void reportInvalidMovementFadeTime() {
+  sendOSCError("/dowser/error/fade", "Fade time must be an integer from 1000-60000 ms");
 }
 
 void reportInvalidMovementAngle() {
@@ -435,7 +443,7 @@ void broadcastAllConfigSettings() {
   delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
   delay(20);
-  broadcastConfigItem("speed", config.defaultSpeed);
+  broadcastConfigItem("fade", config.defaultFadeTimeMs);
 }
 
 void processIncomingOSC() {
@@ -554,15 +562,15 @@ void processIncomingOSC() {
         broadcastConfigItem("heartbeat", config.heartbeatEnabled);
       });
 
-      msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
+      msgIn.route("/dowser/config/fade", [](OSCMessage& msg, int offset) {
         if (msg.size() > 0) {
-          if (msg.size() == 1 && msg.isInt(0) && isValidSpeed(msg.getInt(0))) {
-            config.defaultSpeed = (uint8_t)msg.getInt(0);
+          if (msg.size() == 1 && msg.isInt(0) && isValidFadeTime(msg.getInt(0))) {
+            config.defaultFadeTimeMs = (uint16_t)msg.getInt(0);
           } else {
-            reportInvalidMovementSpeed();
+            reportInvalidMovementFadeTime();
           }
         }
-        broadcastConfigItem("speed", config.defaultSpeed);
+        broadcastConfigItem("fade", config.defaultFadeTimeMs);
       });
 
       // Network Infrastructure Ports
@@ -697,7 +705,7 @@ void processPhysicalButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == 1) {
-        setMovementTargetAtDefaultSpeed((targetPos == down) ? up : down);
+        setMovementTargetAtDefaultFadeTime((targetPos == down) ? up : down);
         ledState = LOW;
       } else {
         ledState = HIGH;
@@ -720,22 +728,22 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: setMovementTargetAtDefaultSpeed(currentPos + 1); break;
-    case 0xBB44FF00: setMovementTargetAtDefaultSpeed(currentPos - 5); break;
+    case 0xB946FF00: setMovementTargetAtDefaultFadeTime(currentPos + 1); break;
+    case 0xBB44FF00: setMovementTargetAtDefaultFadeTime(currentPos - 5); break;
     case 0xBF40FF00:
       if (pauseMV) {
-        setMovementTargetAtDefaultSpeed(savedTargetPrePause);
+        setMovementTargetAtDefaultFadeTime(savedTargetPrePause);
         pauseMV = false;
       } else {
         savedTargetPrePause = targetPos;
-        setMovementTargetAtDefaultSpeed(currentPos);
+        setMovementTargetAtDefaultFadeTime(currentPos);
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: setMovementTargetAtDefaultSpeed(currentPos + 5); break;
-    case 0xF807FF00: setMovementTargetAtDefaultSpeed(down); break;
-    case 0xEA15FF00: setMovementTargetAtDefaultSpeed(currentPos - 1); break;
-    case 0xF609FF00: setMovementTargetAtDefaultSpeed(up); break;
+    case 0xBC43FF00: setMovementTargetAtDefaultFadeTime(currentPos + 5); break;
+    case 0xF807FF00: setMovementTargetAtDefaultFadeTime(down); break;
+    case 0xEA15FF00: setMovementTargetAtDefaultFadeTime(currentPos - 1); break;
+    case 0xF609FF00: setMovementTargetAtDefaultFadeTime(up); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
     case 0xF30CFF00: handleIRPreset(1); break;
@@ -760,22 +768,37 @@ void handleIRPreset(int num) {
       config.irPresets[num] = (uint8_t)currentPos;
     }
   } else {
-    setMovementTargetAtDefaultSpeed(config.irPresets[num]);
+    setMovementTargetAtDefaultFadeTime(config.irPresets[num]);
   }
 }
 
 void loadConfiguration() {
   EEPROM.get(0, config);
   if (config.magicNumber == EEPROM_MAGIC_V1) {
-    // The V1 fields remain a byte-identical prefix; initialize every appended field before writing V2.
-    config.magicNumber = EEPROM_MAGIC_V2;
-    config.defaultSpeed = DEFAULT_SPEED;
+    config.magicNumber = EEPROM_MAGIC_V3;
+    config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     EEPROM.put(0, config);
     return;
   }
 
-  if (config.magicNumber != EEPROM_MAGIC_V2) {
-    config.magicNumber = EEPROM_MAGIC_V2;
+  if (config.magicNumber == EEPROM_MAGIC_V2) {
+    // The V2 field's low byte contains its former one-byte speed setting.
+    uint8_t legacySpeed = (uint8_t)config.defaultFadeTimeMs;
+    config.magicNumber = EEPROM_MAGIC_V3;
+    if (legacySpeed >= 1 && legacySpeed <= 100) {
+      unsigned long migratedFadeTimeMs = 100000UL / legacySpeed;
+      if (migratedFadeTimeMs < MIN_FADE_TIME_MS) migratedFadeTimeMs = MIN_FADE_TIME_MS;
+      if (migratedFadeTimeMs > MAX_FADE_TIME_MS) migratedFadeTimeMs = MAX_FADE_TIME_MS;
+      config.defaultFadeTimeMs = (uint16_t)migratedFadeTimeMs;
+    } else {
+      config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+    }
+    EEPROM.put(0, config);
+    return;
+  }
+
+  if (config.magicNumber != EEPROM_MAGIC_V3) {
+    config.magicNumber = EEPROM_MAGIC_V3;
     config.preferStatic = 1;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
@@ -805,12 +828,12 @@ void loadConfiguration() {
     config.dnBound = 7;
     config.upBound = 173;
     config.defaultPos = 10;
-    config.defaultSpeed = DEFAULT_SPEED;
+    config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     memcpy(config.irPresets, defaultIR, 10);
     EEPROM.put(0, config);
-  } else if (!isValidSpeed(config.defaultSpeed)) {
-    config.defaultSpeed = DEFAULT_SPEED;
+  } else if (!isValidFadeTime(config.defaultFadeTimeMs)) {
+    config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     EEPROM.put(0, config);
   }
 }
@@ -872,8 +895,8 @@ bool parseKeyValue(const char* input, const char* key, int& outValue) {
   return false;
 }
 
-bool isValidSpeed(int speed) {
-  return speed >= MIN_SPEED_PERCENT && speed <= MAX_SPEED_PERCENT;
+bool isValidFadeTime(int fadeTimeMs) {
+  return fadeTimeMs >= MIN_FADE_TIME_MS && fadeTimeMs <= MAX_FADE_TIME_MS;
 }
 
 void handleCommonConsoleCommands(char* input, Print& output) {
@@ -881,7 +904,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-    output.println(F("Keys: down, up, dnbound, upbound, default, speed, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
+    output.println(F("Keys: down, up, dnbound, upbound, default, fade, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
     return;
   }
 
@@ -935,9 +958,9 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(F("Current Position: "));
     output.print(currentPos);
     output.println(F(" deg"));
-    output.print(F("Default Speed : "));
-    output.print(config.defaultSpeed);
-    output.println(F("%"));
+    output.print(F("Default Fade  : "));
+    output.print(config.defaultFadeTimeMs);
+    output.println(F(" ms"));
     return;
   }
 
@@ -991,12 +1014,12 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultPos = val;
       dispatchMessage(source, F("Set Boot Default -> "), val);
     }
-  } else if (parseKeyValue(input, "speed", val)) {
-    if (isValidSpeed(val)) {
-      config.defaultSpeed = (uint8_t)val;
-      dispatchMessage(source, F("Set Default Speed -> "), val);
+  } else if (parseKeyValue(input, "fade", val)) {
+    if (isValidFadeTime(val)) {
+      config.defaultFadeTimeMs = (uint16_t)val;
+      dispatchMessage(source, F("Set Default Fade -> "), val);
     } else {
-      dispatchMessage(source, F("Error: Speed must be 1-100%"));
+      dispatchMessage(source, F("Error: Fade must be 1000-60000 ms"));
     }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;
@@ -1024,7 +1047,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   } else if (isdigit(input[0])) {
     int parsedVal = atoi(input);
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
-      setMovementTargetAtDefaultSpeed(parsedVal);
+      setMovementTargetAtDefaultFadeTime(parsedVal);
       dispatchMessage(source, F("Move -> "), targetPos);
     }
   }

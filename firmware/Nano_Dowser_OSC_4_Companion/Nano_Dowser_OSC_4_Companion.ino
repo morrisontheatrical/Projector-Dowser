@@ -58,10 +58,16 @@ const unsigned long MOVEMENT_CREDIT_PER_DEGREE = 10000000UL;
 const unsigned long SPEED_PERCENT_SCALE = 100UL;
 const unsigned long MICROSECONDS_PER_SECOND = 1000000UL;
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 1000000UL;
-// These scales divide exactly to 18 credits/us/percent; the capped maximum update plus remainder is < 1.81e9.
 const unsigned long MOVEMENT_CREDIT_PER_US_PER_PERCENT =
     (MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) /
     (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND);
+static_assert((MAX_SLEW_DEGREES_PER_SECOND * MOVEMENT_CREDIT_PER_DEGREE) %
+                  (SPEED_PERCENT_SCALE * MICROSECONDS_PER_SECOND) == 0,
+              "Motion credit scales must yield an integral rate");
+static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US *
+                      MOVEMENT_CREDIT_PER_US_PER_PERCENT * 100ULL +
+                  MOVEMENT_CREDIT_PER_DEGREE - 1 <= 0xFFFFFFFFULL,
+              "Motion credit update must fit in unsigned long");
 
 int down;
 int up;
@@ -116,6 +122,7 @@ void updateServo();
 void setMovementTarget(int target, uint8_t speed);
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
 void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex);
+void reportInvalidMovementSpeed();
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
@@ -250,8 +257,6 @@ void setMovementTarget(int target, uint8_t speed) {
     targetPos = target;
   }
   activeMoveSpeed = speed;
-  movementCredit = 0;
-  lastMoveUpdateMicros = micros();
 }
 
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
@@ -272,8 +277,19 @@ void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentInde
   if (getMovementSpeed(msg, speedArgumentIndex, speed)) {
     setMovementTarget(target, speed);
   } else {
-    Serial.println(F("Rejected OSC move: speed must be an integer from 1-100"));
+    reportInvalidMovementSpeed();
   }
+}
+
+void reportInvalidMovementSpeed() {
+  Serial.println(F("Rejected OSC move: speed must be an integer from 1-100"));
+  IPAddress senderIP = Udp.remoteIP();
+  unsigned int senderPort = Udp.remotePort();
+  OSCMessage error("/dowser/error/speed");
+  error.add("Speed must be an integer from 1-100");
+  Udp.beginPacket(senderIP, senderPort);
+  error.send(Udp);
+  Udp.endPacket();
 }
 
 /*/ --- NEW COMPANION OSC FEEDBACK ENGINE ---
@@ -873,6 +889,9 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.println(F("]"));
     output.print(F("Active Target : "));
     output.print(targetPos);
+    output.println(F(" deg"));
+    output.print(F("Current Position: "));
+    output.print(currentPos);
     output.println(F(" deg"));
     output.print(F("Default Speed : "));
     output.print(config.defaultSpeed);

@@ -1,6 +1,6 @@
 # Projector Dowser
 
-A networked stage automation system for controlling a projector dowser (motorized iris/shutter) via OSC protocol. Built around an Arduino Nano Every with Ethernet connectivity, supporting real-time control from QLab, Bitfocus Companion, or any OSC-capable console.
+A networked stage automation system for controlling a projector dowser (motorized iris/shutter) via OSC protocol. Built around an Arduino Nano Every or Nano R4 with Ethernet connectivity, supporting real-time control from QLab, Bitfocus Companion, or any OSC-capable console.
 
 ## Overview
 
@@ -15,7 +15,7 @@ The Projector Dowser is a custom-built theatrical automation device that:
 
 | Component | Specification |
 |-----------|---------------|
-| **Microcontroller** | Arduino Nano Every |
+| **Microcontroller** | Arduino Nano Every (`arduino:megaavr:nona4809`) or Nano R4 (`arduino:renesas_uno:nanor4`) |
 | **Servo Motor** | Standard 180° servo (e.g., SG90) |
 | **Ethernet** | W5500 Ethernet shield (CS pin 10) |
 | **IR Receiver** | 38kHz IR receiver module (pin 5) |
@@ -282,7 +282,7 @@ Install via Arduino IDE Library Manager:
 ## Getting Started
 
 ### 1. Hardware Setup
-- Assemble Arduino Nano Every + W5500 Ethernet shield
+- Assemble Arduino Nano Every or Nano R4 + W5500 Ethernet shield (CS on pin 10)
 - Connect servo to pin 3 (PWM signal)
 - Connect IR receiver to pin 5
 - Connect button to pin 2

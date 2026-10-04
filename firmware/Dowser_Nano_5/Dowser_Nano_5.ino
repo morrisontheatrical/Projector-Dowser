@@ -4,7 +4,6 @@
 #include <OSCMessage.h>
 #include <EEPROM.h>
 #include <Servo.h>
-#include <avr/wdt.h>
 #include <ctype.h>
 
 // --- PHYSICAL PIN CONFIGURATION ---
@@ -135,6 +134,8 @@ void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
 
+bool networkAvailable = false;
+
 void setup() {
   Serial.begin(1000000);
   unsigned long serialTimeout = millis();
@@ -153,10 +154,15 @@ void setup() {
   upBound = config.upBound;
 
   Ethernet.init(ETHERNET_CS_PIN);
-  initNetwork();
-  Udp.begin(config.localPort);
-
-  telnetServer.begin();
+  Ethernet.begin(mac, IPAddress(0, 0, 0, 0));
+  networkAvailable = (Ethernet.hardwareStatus() != EthernetNoHardware);
+  if (networkAvailable) {
+    initNetwork();
+    Udp.begin(config.localPort);
+    telnetServer.begin();
+  } else {
+    Serial.println(F("Ethernet hardware not found - network disabled"));
+  }
 
   myservo.attach(SERVO_PIN);
   currentPos = down;
@@ -308,6 +314,7 @@ void setMovementTargetFromOSC(OSCMessage& msg, int target, int fadeTimeArgumentI
 
 void sendOSCError(const char* path, const char* message) {
   Serial.println(message);
+  if (!networkAvailable) return;
   IPAddress senderIP = Udp.remoteIP();
   unsigned int senderPort = Udp.remotePort();
   OSCMessage error(path);
@@ -360,6 +367,7 @@ void broadcastCompanionState() {
   msgAngle.empty(); msgUp.empty(); msgDown.empty(); msgQLab.empty();
 }*/
 void broadcastCompanionState() {
+  if (!networkAvailable) return;
   // 1. Prepare QLab workspace payloads
   char noteBuffer[16];
   itoa(currentPos, noteBuffer, 10);
@@ -408,6 +416,7 @@ void broadcastCompanionState() {
 }
 // Helper to broadcast a single integer configuration item
 void broadcastConfigItem(const char* subPath, int value) {
+  if (!networkAvailable) return;
   char fullPath[50];
   strcpy_P(fullPath, PSTR("/dowser/config/"));
   strcat(fullPath, subPath);
@@ -427,6 +436,7 @@ void broadcastConfigItem(const char* subPath, int value) {
 
 // Bulk dump function to sync all Companion configuration fields at once
 void broadcastAllConfigSettings() {
+  if (!networkAvailable) return;
   broadcastConfigItem("down", config.posDown);
   delay(20);
   broadcastConfigItem("up", config.posUp);
@@ -455,6 +465,7 @@ void broadcastAllConfigSettings() {
 }
 
 void broadcastFadeTimeConfig() {
+  if (!networkAvailable) return;
   OSCMessage msg("/dowser/config/fade");
   msg.add((float)config.defaultFadeTimeMs / 1000.0f);
 
@@ -469,6 +480,7 @@ void broadcastFadeTimeConfig() {
 }
 
 void processIncomingOSC() {
+  if (!networkAvailable) return;
   OSCMessage msgIn;
   int packetSize = Udp.parsePacket();
 
@@ -871,6 +883,7 @@ void parseSerialIP(char* inputStr, uint8_t* ipArray) {
 }
 
 void processTelnetConsole() {
+  if (!networkAvailable) return;
   if (!telnetClient.connected()) {
     EthernetClient incomingClient = telnetServer.accept();
     if (incomingClient) {
@@ -1133,6 +1146,10 @@ void handleCommonConsoleCommands(char* input, Print& output) {
 
 void rebootDevice() {
   Serial.flush();
+#if defined(ARDUINO_ARCH_RENESAS) || defined(ARDUINO_ARCH_RENESAS_UNO)
+  NVIC_SystemReset();
+#else
   _PROTECTED_WRITE(RSTCTRL.SWRR, RSTCTRL_SWRE_bm);
+#endif
   while (true) {}
 }

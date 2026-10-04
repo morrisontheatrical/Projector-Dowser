@@ -282,7 +282,7 @@ Install via Arduino IDE Library Manager:
 2. Install all required libraries (see above)
 3. Update `mac[]` to a unique address on your network (if needed)
 4. Update IR remote codes in `translateIRCommand()` to match your remote
-5. Open `Nano_Dowser_OSC_4_Companion.ino` and upload
+5. Open `firmware/Nano_Dowser_OSC_4_Companion/Nano_Dowser_OSC_4_Companion.ino` and upload
 
 ### 3. Initial Configuration
 - **USB Serial**: Connect, send `show` to verify defaults
@@ -291,10 +291,10 @@ Install via Arduino IDE Library Manager:
 - **IR test**: Press remote buttons and watch serial output for codes
 
 ### 4. QLab Integration
-See `docs/QLab_Integration.md` for AppleScript and named-pipe setup.
+Background notes on the earlier QLab and macOS serial integration are in [`docs/project-overview.md`](docs/project-overview.md).
 
 ### 5. Companion Integration
-See `docs/Companion_Integration.md` for OSC surface configuration.
+OSC design and Companion-related troubleshooting notes are in [`docs/conversation-overview-gemini.md`](docs/conversation-overview-gemini.md).
 
 ## Default Startup Sequence
 
@@ -364,30 +364,12 @@ For issues, documentation updates, or feature requests, please open an issue or 
 
 ```
 Projector-Dowser/
-├── README.md                           # This file
-├── Nano_Dowser_OSC_4_Companion.ino     # Main firmware (Arduino sketch)
+├── README.md
 ├── docs/
-│   ├── QLab_Integration.md             # QLab automation setup (Python pipe + AppleScript)
-│   ├── Companion_Integration.md        # Bitfocus Companion configuration examples
-│   ├── OSC_Protocol_Reference.md       # Detailed OSC endpoint documentation
-│   ├── Hardware_Assembly.md            # Photos, pinouts, breadboard layout
-│   ├── Troubleshooting.md              # Common issues and solutions
-│   └── Version_History.md              # Changelog and release notes
-├── examples/
-│   ├── QLab_example.applescript        # Sample QLab automation cues
-│   ├── python_osc_client.py            # Python script to send OSC commands
-│   └── companion_surface.json          # Companion surface export
+│   ├── conversation-overview-gemini.md
+│   └── project-overview.md
 ├── firmware/
-│   ├── Nano_Dowser_OSC_4_Companion/    # Main firmware folder
-│   │   ├── Nano_Dowser_OSC_4_Companion.ino
-│   │   └── config.h (future: extract constants)
-│   └── archived/                       # Previous versions
-│       ├── Nano_Dowser_v1.ino
-│       ├── Nano_Dowser_v2.ino
-│       └── Nano_Dowser_v3.ino
-└── testing/
-    ├── servo_test.ino                  # Basic servo PWM test
-    ├── osc_echo.py                     # OSC debug sniffer
-    └── ir_decoder.ino                  # Identify unknown IR codes
+│   ├── Nano_Dowser_OSC_4_Companion/
+│   │   └── Nano_Dowser_OSC_4_Companion.ino  # Main firmware
+│   └── archived/                       # Earlier and experimental sketches
 ```
-

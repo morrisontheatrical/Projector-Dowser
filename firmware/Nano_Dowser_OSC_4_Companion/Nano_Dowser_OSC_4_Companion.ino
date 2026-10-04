@@ -38,11 +38,20 @@ struct DeviceConfiguration {
   uint8_t upBound;
   uint8_t defaultPos;
   uint8_t irPresets[10];
+  uint8_t defaultSpeed;
 };
 
 int targetPos;
+int currentPos;
 int savedTargetPrePause;
+uint8_t activeMoveSpeed;
+unsigned long lastMoveUpdate = 0;
+unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
+
+const uint8_t EEPROM_MAGIC_V1 = 0x53;
+const uint8_t EEPROM_MAGIC_V2 = 0x55;
+const uint8_t DEFAULT_SPEED = 33;
 
 int down;
 int up;
@@ -94,6 +103,8 @@ void processSerialConsole();
 void processPhysicalButton();
 void processIRInput();
 void updateServo();
+void setMovementTarget(int target, uint8_t speed);
+bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
@@ -122,8 +133,11 @@ void setup() {
   telnetServer.begin();
 
   myservo.attach(SERVO_PIN);
-  myservo.write(down);
+  currentPos = down;
   targetPos = down;
+  activeMoveSpeed = config.defaultSpeed;
+  myservo.write(currentPos);
+  lastMoveUpdate = millis();
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -142,9 +156,9 @@ void loop() {
   if (currentMillis - lastTelemetryTime >= 50) {
 
     // Condition A: The mechanism is in transit (live update)
-    if (targetPos != lastKnownPos) {
+    if (currentPos != lastKnownPos) {
       broadcastCompanionState();
-      lastKnownPos = targetPos;
+      lastKnownPos = currentPos;
       lastTelemetryTime = currentMillis;  // Reset frame clock
     }
     // Condition B: Mechanism is static, send a 1-second background heartbeat
@@ -176,35 +190,75 @@ void updateServo() {
     targetPos = dnBound + 1;
   }
 
-  myservo.write(targetPos);
+  unsigned long now = millis();
+  unsigned long elapsed = now - lastMoveUpdate;
+  lastMoveUpdate = now;
+  if (elapsed > 1000) elapsed = 1000;
 
-  if (targetPos != lastReportedTarget) {
-    if (targetPos == up) {
+  if (currentPos != targetPos) {
+    movementCredit += elapsed * 18UL * activeMoveSpeed;
+    unsigned long steps = movementCredit / 10000UL;
+    movementCredit %= 10000UL;
+    int distance = abs(targetPos - currentPos);
+    if (steps > (unsigned long)distance) {
+      steps = distance;
+      movementCredit = 0;
+    }
+    if (steps > 0) {
+      currentPos += (targetPos > currentPos) ? (int)steps : -(int)steps;
+      myservo.write(currentPos);
+    }
+  } else {
+    movementCredit = 0;
+  }
+
+  if (currentPos != lastReportedTarget) {
+    if (currentPos == up) {
       currentPresetName = "Open (Up)";
-    } else if (targetPos == down) {
+    } else if (currentPos == down) {
       currentPresetName = "Closed (Down)";
     } else {
       static char dynamicLabel[24];
-      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), targetPos);
+      snprintf_P(dynamicLabel, sizeof(dynamicLabel), PSTR("Angle: %d"), currentPos);
       currentPresetName = dynamicLabel;
     }
 
     // Instantly push updates to Companion on mechanical change
     broadcastCompanionState();
-    lastReportedTarget = targetPos;
+    lastReportedTarget = currentPos;
   }
+}
+
+void setMovementTarget(int target, uint8_t speed) {
+  targetPos = target;
+  activeMoveSpeed = speed;
+  movementCredit = 0;
+  lastMoveUpdate = millis();
+}
+
+bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
+  if (msg.size() == argumentIndex) {
+    speed = config.defaultSpeed;
+    return true;
+  }
+  if (msg.size() != argumentIndex + 1) return false;
+  if (!msg.isInt(argumentIndex)) return false;
+  int value = msg.getInt(argumentIndex);
+  if (value < 1 || value > 100) return false;
+  speed = (uint8_t)value;
+  return true;
 }
 
 /*/ --- NEW COMPANION OSC FEEDBACK ENGINE ---
 void broadcastCompanionState() {
   // 1. Prepare Companion native tracking payloads
-  OSCMessage msgAngle("/dowser/state/angle");   msgAngle.add(targetPos);
-  OSCMessage msgUp("/dowser/state/isUp");       msgUp.add(targetPos == up ? 1 : 0);
-  OSCMessage msgDown("/dowser/state/isDown");   msgDown.add(targetPos == down ? 1 : 0);
+  OSCMessage msgAngle("/dowser/state/angle");   msgAngle.add(currentPos);
+  OSCMessage msgUp("/dowser/state/isUp");       msgUp.add(currentPos == up ? 1 : 0);
+  OSCMessage msgDown("/dowser/state/isDown");   msgDown.add(currentPos == down ? 1 : 0);
 
   // 2. Prepare QLab note payload (Converts integer position to string)
   char noteBuffer[16];
-  itoa(targetPos, noteBuffer, 10); // Converts integer to string character array cleanly
+  itoa(currentPos, noteBuffer, 10); // Converts integer to string character array cleanly
   OSCMessage msgQLab("/cue/DOWSER_STATUS/notes");
   msgQLab.add(noteBuffer);
   OSCMessage msgQLab1("/cue/DOWSER_STATUS/name");
@@ -232,7 +286,7 @@ void broadcastCompanionState() {
 void broadcastCompanionState() {
   // 1. Prepare QLab workspace payloads
   char noteBuffer[16];
-  itoa(targetPos, noteBuffer, 10);
+  itoa(currentPos, noteBuffer, 10);
   OSCMessage msgQLab("/cue/DOWSER_STATUS/notes");
   msgQLab.add(noteBuffer);
   OSCMessage msgQLab1("/cue/DOWSER_STATUS/name");
@@ -240,11 +294,11 @@ void broadcastCompanionState() {
 
   // 2. Prepare distinct Companion telemetry payloads
   OSCMessage msgUp("/dowser/state/isUp");
-  msgUp.add(targetPos == config.posUp ? 1 : 0);
+  msgUp.add(currentPos == config.posUp ? 1 : 0);
   OSCMessage msgDown("/dowser/state/isDown");
-  msgDown.add(targetPos == config.posDown ? 1 : 0);
+  msgDown.add(currentPos == config.posDown ? 1 : 0);
   OSCMessage msgAngle("/dowser/state/angle");
-  msgAngle.add(targetPos);
+  msgAngle.add(currentPos);
 
   // 3. Iterate across active port allocations
   for (uint8_t i = 0; i < 3; i++) {
@@ -308,6 +362,8 @@ void broadcastAllConfigSettings() {
   broadcastConfigItem("static", config.preferStatic);        delay(20);
   broadcastConfigItem("telemetry", config.telemetryMode);    delay(20);
   broadcastConfigItem("heartbeat", config.heartbeatEnabled);
+  delay(20);
+  broadcastConfigItem("speed", config.defaultSpeed);
 }
 
 void processIncomingOSC() {
@@ -322,22 +378,29 @@ void processIncomingOSC() {
     if (!msgIn.hasError()) {
       // --- CORE OPERATIONAL ROUTING ---
       msgIn.route("/dowser/up", [](OSCMessage& msg, int offset) {
-        targetPos = config.posUp;
+        uint8_t speed;
+        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posUp, speed);
       });
       msgIn.route("/dowser/down", [](OSCMessage& msg, int offset) {
-        targetPos = config.posDown;
+        uint8_t speed;
+        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posDown, speed);
       });
       msgIn.route("/dowser/angle", [](OSCMessage& msg, int offset) {
         if (msg.size() > 0 && (msg.isInt(0) || msg.isFloat(0))) {
           int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
-          if (angle >= config.dnBound && angle <= config.upBound) { targetPos = angle; }
+          uint8_t speed;
+          if (angle >= config.dnBound && angle <= config.upBound &&
+              getMovementSpeed(msg, 1, speed)) {
+            setMovementTarget(angle, speed);
+          }
         }
       });
       msgIn.route("/dowser/query", [](OSCMessage& msg, int offset) {
         broadcastCompanionState();
       });
       msgIn.route("/dowser/reset", [](OSCMessage& msg, int offset) {
-        targetPos = config.posDown;
+        uint8_t speed;
+        if (getMovementSpeed(msg, 0, speed)) setMovementTarget(config.posDown, speed);
       });
 
       // --- CONFIGURATION MANAGEMENT LAYER (GET / SET) ---
@@ -417,6 +480,14 @@ void processIncomingOSC() {
           config.heartbeatEnabled = (msg.getInt(0) == 1) ? 1 : 0;
         }
         broadcastConfigItem("heartbeat", config.heartbeatEnabled);
+      });
+
+      msgIn.route("/dowser/config/speed", [](OSCMessage& msg, int offset) {
+        if (msg.size() > 0 && msg.isInt(0)) {
+          int val = msg.getInt(0);
+          if (val >= 1 && val <= 100) config.defaultSpeed = (uint8_t)val;
+        }
+        broadcastConfigItem("speed", config.defaultSpeed);
       });
 
       // Network Infrastructure Ports
@@ -551,7 +622,7 @@ void processPhysicalButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == 1) {
-        targetPos = (targetPos == down) ? up : down;
+        setMovementTarget((targetPos == down) ? up : down, config.defaultSpeed);
         ledState = LOW;
       } else {
         ledState = HIGH;
@@ -574,22 +645,22 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: targetPos = myservo.read() + 1; break;
-    case 0xBB44FF00: targetPos = myservo.read() - 5; break;
+    case 0xB946FF00: setMovementTarget(currentPos + 1, config.defaultSpeed); break;
+    case 0xBB44FF00: setMovementTarget(currentPos - 5, config.defaultSpeed); break;
     case 0xBF40FF00:
       if (pauseMV) {
-        targetPos = savedTargetPrePause;
+        setMovementTarget(savedTargetPrePause, config.defaultSpeed);
         pauseMV = false;
       } else {
         savedTargetPrePause = targetPos;
-        targetPos = myservo.read();
+        setMovementTarget(currentPos, config.defaultSpeed);
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: targetPos = myservo.read() + 5; break;
-    case 0xF807FF00: targetPos = down; break;
-    case 0xEA15FF00: targetPos = myservo.read() - 1; break;
-    case 0xF609FF00: targetPos = up; break;
+    case 0xBC43FF00: setMovementTarget(currentPos + 5, config.defaultSpeed); break;
+    case 0xF807FF00: setMovementTarget(down, config.defaultSpeed); break;
+    case 0xEA15FF00: setMovementTarget(currentPos - 1, config.defaultSpeed); break;
+    case 0xF609FF00: setMovementTarget(up, config.defaultSpeed); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
     case 0xF30CFF00: handleIRPreset(1); break;
@@ -611,17 +682,24 @@ void handleIRPreset(int num) {
       presetMode = false;
     } else {
       presetMode = true;
-      config.irPresets[num] = (uint8_t)myservo.read();
+      config.irPresets[num] = (uint8_t)currentPos;
     }
   } else {
-    targetPos = config.irPresets[num];
+    setMovementTarget(config.irPresets[num], config.defaultSpeed);
   }
 }
 
 void loadConfiguration() {
   EEPROM.get(0, config);
-  if (config.magicNumber != 0x53) {
-    config.magicNumber = 0x53;
+  if (config.magicNumber == EEPROM_MAGIC_V1) {
+    config.magicNumber = EEPROM_MAGIC_V2;
+    config.defaultSpeed = DEFAULT_SPEED;
+    EEPROM.put(0, config);
+    return;
+  }
+
+  if (config.magicNumber != EEPROM_MAGIC_V2) {
+    config.magicNumber = EEPROM_MAGIC_V2;
     config.preferStatic = 1;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
@@ -651,8 +729,12 @@ void loadConfiguration() {
     config.dnBound = 7;
     config.upBound = 173;
     config.defaultPos = 10;
+    config.defaultSpeed = DEFAULT_SPEED;
     uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     memcpy(config.irPresets, defaultIR, 10);
+    EEPROM.put(0, config);
+  } else if (config.defaultSpeed < 1 || config.defaultSpeed > 100) {
+    config.defaultSpeed = DEFAULT_SPEED;
     EEPROM.put(0, config);
   }
 }
@@ -719,7 +801,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-    output.println(F("Keys: down, up, dnbound, upbound, default, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
+    output.println(F("Keys: down, up, dnbound, upbound, default, speed, localport, targetport, static, telemetry, heartbeat, ip, targetip, preset[0-9]"));
     return;
   }
 
@@ -770,6 +852,9 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(F("Active Target : "));
     output.print(targetPos);
     output.println(F(" deg"));
+    output.print(F("Default Speed : "));
+    output.print(config.defaultSpeed);
+    output.println(F("%"));
     return;
   }
 
@@ -823,6 +908,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultPos = val;
       dispatchMessage(source, F("Set Boot Default -> "), val);
     }
+  } else if (parseKeyValue(input, "speed", val)) {
+    if (val >= 1 && val <= 100) {
+      config.defaultSpeed = (uint8_t)val;
+      dispatchMessage(source, F("Set Default Speed -> "), val);
+    } else {
+      output.println(F("Error: Speed must be 1-100%"));
+    }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;
     dispatchMessage(source, F("Set Local Port -> "), val);
@@ -849,7 +941,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   } else if (isdigit(input[0])) {
     int parsedVal = atoi(input);
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
-      targetPos = parsedVal;
+      setMovementTarget(parsedVal, config.defaultSpeed);
       dispatchMessage(source, F("Move -> "), targetPos);
     }
   }

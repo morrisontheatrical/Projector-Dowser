@@ -40,9 +40,9 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 #### Core Movement
 | Endpoint | Args | Description |
 |----------|------|-------------|
-| `/dowser/up` | — | Move to the "up" preset position |
-| `/dowser/down` | — | Move to the "down" preset position |
-| `/dowser/angle` | `int` or `float` | Move to specific angle (degrees) |
+| `/dowser/up` | optional `int speed` | Move to the "up" preset at the default speed or the supplied one-move speed |
+| `/dowser/down` | optional `int speed` | Move to the "down" preset at the default speed or the supplied one-move speed |
+| `/dowser/angle` | `int` or `float` angle, optional `int speed` | Move to a specific angle (degrees), optionally overriding speed for this move |
 | `/dowser/query` | — | Request immediate state broadcast |
 | `/dowser/reset` | — | Move to default position |
 
@@ -59,8 +59,11 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 | `/dowser/config/static` | `0\|1` | Broadcasts static IP mode | Enables/disables static IP |
 | `/dowser/config/telemetry` | `0\|1\|2` | Broadcasts telemetry mode | Sets telemetry routing mode |
 | `/dowser/config/heartbeat` | `0\|1` | Broadcasts heartbeat state | Enables/disables heartbeat |
-| `/dowser/config/queryAll` | — | Broadcasts all 12 config fields | N/A (query only) |
+| `/dowser/config/speed` | `int` (1-100) | Broadcasts default speed | Sets persistent default movement speed (%) |
+| `/dowser/config/queryAll` | — | Broadcasts all 13 config fields | N/A (query only) |
 | `/dowser/config/save` | — | N/A | Saves config to EEPROM + reboot |
+
+Movement speed is a percentage of the maximum commanded slew rate (180°/s): 100% is the maximum and lower values move more slowly. For example, `/dowser/up 30` uses 30% speed for that move, while `/dowser/angle 90 50` moves to 90° at 50%. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; this controls commanded servo position changes, not guaranteed physical speed or mechanical noise.
 
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |
@@ -148,6 +151,7 @@ up=170              # Set up position to 170°
 dnbound=5           # Set lower hard limit to 5°
 upbound=175         # Set upper hard limit to 175°
 default=90          # Set boot default to 90°
+speed=33            # Set default movement speed (1-100%)
 localport=8001      # Set listening port
 targetport0=12000   # Set target port 0
 targetport1=53000   # Set target port 1
@@ -249,10 +253,11 @@ struct DeviceConfiguration {
   uint8_t upBound;              // Upper hard limit (default 173°)
   uint8_t defaultPos;           // Boot power-on position (default 10°)
   uint8_t irPresets[10];        // IR preset angles [0-9]
+  uint8_t defaultSpeed;         // Default commanded slew rate (default 33%)
 };
 ```
 
-Stored at EEPROM address 0. Factory reset triggers on `magicNumber != 0x53`.
+Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x55` with the existing settings preserved and default speed initialized to 33%. Unknown markers trigger factory defaults. Valid speed values are 1-100%.
 
 ## Dependency Libraries
 
@@ -300,7 +305,7 @@ OSC design and Companion-related troubleshooting notes are in [`docs/conversatio
 
 On power-up or reboot:
 1. Serial baud rate set to 1Mbaud
-2. EEPROM loaded; if `magicNumber != 0x53`, factory reset occurs
+2. EEPROM loaded; legacy marker `0x53` migrates to `0x55`; unknown markers trigger factory reset
 3. Ethernet initialized (static IP or DHCP fallback)
 4. Telnet server begins listening on port 23
 5. Servo attaches to pin 3, moves to `config.defaultPos` (10°)

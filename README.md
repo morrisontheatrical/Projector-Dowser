@@ -65,9 +65,9 @@ The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground re
 
 Movement speed is a percentage of the maximum commanded slew rate (180°/s): 100% is the maximum and lower values move more slowly. For example, `/dowser/up 30` uses 30% speed for that move, while `/dowser/angle 90 50` moves to 90° at 50%. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; this controls commanded servo position changes, not guaranteed physical speed or mechanical noise.
 
-An invalid OSC movement speed is rejected and returned to the sender as `/dowser/error/speed` with a short explanation. The serial console also logs the rejection.
+`/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the boot position (`config.defaultPos`). Invalid OSC speeds and angles are rejected and returned to the sender as `/dowser/error/speed` and `/dowser/error/angle`, respectively. The serial console also logs each rejection.
 
-Suggested hardware checks: compare movement at 100% and 50%, retarget during a move and confirm it continues from the current reported angle, and verify invalid overrides (0, 101, or a non-integer) do not start a move. Set `speed=50`, save, and reboot to check persistence; on a legacy 0x53 device, confirm existing settings remain intact and the new default is 33%.
+Suggested hardware checks: compare movement at 100% and 50%, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid speeds (0, 101, or a non-integer) and out-of-bounds angles return errors without starting a move. Set `speed=50`, save, and reboot to check persistence; on a legacy 0x53 device, confirm existing settings remain intact and the new default is 33%.
 
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |

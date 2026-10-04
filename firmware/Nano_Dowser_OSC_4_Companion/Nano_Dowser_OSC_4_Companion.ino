@@ -120,9 +120,12 @@ void processPhysicalButton();
 void processIRInput();
 void updateServo();
 void setMovementTarget(int target, uint8_t speed);
+void setMovementTargetAtDefaultSpeed(int target);
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed);
 void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentIndex);
+void reportInvalidMovementAngle();
 void reportInvalidMovementSpeed();
+void sendOSCError(const char* path, const char* message);
 void translateIRCommand(long IRData);
 void handleIRPreset(int num);
 void rebootDevice();
@@ -259,6 +262,10 @@ void setMovementTarget(int target, uint8_t speed) {
   activeMoveSpeed = speed;
 }
 
+void setMovementTargetAtDefaultSpeed(int target) {
+  setMovementTarget(target, config.defaultSpeed);
+}
+
 bool getMovementSpeed(OSCMessage& msg, int argumentIndex, uint8_t& speed) {
   if (msg.size() == argumentIndex) {
     speed = config.defaultSpeed;
@@ -281,15 +288,23 @@ void setMovementTargetFromOSC(OSCMessage& msg, int target, int speedArgumentInde
   }
 }
 
-void reportInvalidMovementSpeed() {
-  Serial.println(F("Rejected OSC move: speed must be an integer from 1-100"));
+void sendOSCError(const char* path, const char* message) {
+  Serial.println(message);
   IPAddress senderIP = Udp.remoteIP();
   unsigned int senderPort = Udp.remotePort();
-  OSCMessage error("/dowser/error/speed");
-  error.add("Speed must be an integer from 1-100");
+  OSCMessage error(path);
+  error.add(message);
   Udp.beginPacket(senderIP, senderPort);
   error.send(Udp);
   Udp.endPacket();
+}
+
+void reportInvalidMovementSpeed() {
+  sendOSCError("/dowser/error/speed", "Speed must be an integer from 1-100");
+}
+
+void reportInvalidMovementAngle() {
+  sendOSCError("/dowser/error/angle", "Angle must be a number within configured bounds");
 }
 
 /*/ --- NEW COMPANION OSC FEEDBACK ENGINE ---
@@ -427,12 +442,16 @@ void processIncomingOSC() {
         setMovementTargetFromOSC(msg, config.posDown, 0);
       });
       msgIn.route("/dowser/angle", [](OSCMessage& msg, int offset) {
-        if (msg.size() > 0 && (msg.isInt(0) || msg.isFloat(0))) {
-          int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
-          if (angle >= config.dnBound && angle <= config.upBound) {
-            setMovementTargetFromOSC(msg, angle, 1);
-          }
+        if (msg.size() == 0 || (!msg.isInt(0) && !msg.isFloat(0))) {
+          reportInvalidMovementAngle();
+          return;
         }
+        int angle = msg.isInt(0) ? msg.getInt(0) : (int)msg.getFloat(0);
+        if (angle < config.dnBound || angle > config.upBound) {
+          reportInvalidMovementAngle();
+          return;
+        }
+        setMovementTargetFromOSC(msg, angle, 1);
       });
       msgIn.route("/dowser/query", [](OSCMessage& msg, int offset) {
         broadcastCompanionState();
@@ -660,7 +679,7 @@ void processPhysicalButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == 1) {
-        setMovementTarget((targetPos == down) ? up : down, config.defaultSpeed);
+        setMovementTargetAtDefaultSpeed((targetPos == down) ? up : down);
         ledState = LOW;
       } else {
         ledState = HIGH;
@@ -683,22 +702,22 @@ void translateIRCommand(long IRData) {
   switch (IRData) {
     case 0xBA45FF00: break;
     case 0xB847FF00: editPos = !editPos; break;
-    case 0xB946FF00: setMovementTarget(currentPos + 1, config.defaultSpeed); break;
-    case 0xBB44FF00: setMovementTarget(currentPos - 5, config.defaultSpeed); break;
+    case 0xB946FF00: setMovementTargetAtDefaultSpeed(currentPos + 1); break;
+    case 0xBB44FF00: setMovementTargetAtDefaultSpeed(currentPos - 5); break;
     case 0xBF40FF00:
       if (pauseMV) {
-        setMovementTarget(savedTargetPrePause, config.defaultSpeed);
+        setMovementTargetAtDefaultSpeed(savedTargetPrePause);
         pauseMV = false;
       } else {
         savedTargetPrePause = targetPos;
-        setMovementTarget(currentPos, config.defaultSpeed);
+        setMovementTargetAtDefaultSpeed(currentPos);
         pauseMV = true;
       }
       break;
-    case 0xBC43FF00: setMovementTarget(currentPos + 5, config.defaultSpeed); break;
-    case 0xF807FF00: setMovementTarget(down, config.defaultSpeed); break;
-    case 0xEA15FF00: setMovementTarget(currentPos - 1, config.defaultSpeed); break;
-    case 0xF609FF00: setMovementTarget(up, config.defaultSpeed); break;
+    case 0xBC43FF00: setMovementTargetAtDefaultSpeed(currentPos + 5); break;
+    case 0xF807FF00: setMovementTargetAtDefaultSpeed(down); break;
+    case 0xEA15FF00: setMovementTargetAtDefaultSpeed(currentPos - 1); break;
+    case 0xF609FF00: setMovementTargetAtDefaultSpeed(up); break;
     case 0xF20DFF00: myservo.detach(); break;
     case 0xE916FF00: handleIRPreset(0); break;
     case 0xF30CFF00: handleIRPreset(1); break;
@@ -723,7 +742,7 @@ void handleIRPreset(int num) {
       config.irPresets[num] = (uint8_t)currentPos;
     }
   } else {
-    setMovementTarget(config.irPresets[num], config.defaultSpeed);
+    setMovementTargetAtDefaultSpeed(config.irPresets[num]);
   }
 }
 
@@ -982,7 +1001,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   } else if (isdigit(input[0])) {
     int parsedVal = atoi(input);
     if (parsedVal >= config.dnBound && parsedVal <= config.upBound) {
-      setMovementTarget(parsedVal, config.defaultSpeed);
+      setMovementTargetAtDefaultSpeed(parsedVal);
       dispatchMessage(source, F("Move -> "), targetPos);
     }
   }

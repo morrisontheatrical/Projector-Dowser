@@ -1,37 +1,48 @@
 # Projector Dowser
 
-A networked stage automation system for controlling a projector dowser (motorized iris/shutter) via OSC protocol. Built around an Arduino Nano Every or Nano R4 with Ethernet connectivity, supporting real-time control from QLab, Bitfocus Companion, or any OSC-capable console.
+Firmware and project notes for an Arduino-based projector dowser. The current
+repository sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
+
+## Current Firmware and Installed Hardware
+
+The repository source and the firmware currently installed on the hardware are
+not all the same version:
+
+- `Dowser_Nano_5.ino` is loaded on an Arduino Nano R4.
+- A separate serial-control firmware version remains loaded on a Nano Every
+  connected to the motor through the XLR port.
+- The original OSC firmware, created before this repository, remains loaded on
+  a second Nano Every connected to the Ethernet port/chip.
+
+The OSC endpoints and configuration documented below describe the tracked
+`Dowser_Nano_5.ino` source. Do not assume the two Nano Every boards run this
+source or expose the same commands. The original pre-repository OSC firmware
+is not included as a separately identified source file here.
 
 ## Overview
 
 The Projector Dowser is a custom-built theatrical automation device that:
 - **Controls a servo motor** to open/close a projector iris or shutter
-- **Communicates via OSC** over Ethernet for remote control and telemetry
+- **Communicates via OSC** over a compatible Ethernet interface for remote control and telemetry
 - **Supports multiple control interfaces**: physical button, IR remote, serial console, Telnet console, or OSC network commands
 - **Streams real-time state** to Companion and QLab for feedback and synchronization
 - **Stores configuration in EEPROM** for persistent calibration across reboots
 
-## Hardware
+## Firmware Hardware Interfaces
 
 | Component | Specification |
 |-----------|---------------|
-| **Microcontroller** | Arduino Nano Every (`arduino:megaavr:nona4809`) or Nano R4 (`arduino:renesas_uno:nanor4`) |
-| **Servo Motor** | Standard 180° servo (e.g., SG90) |
-| **Ethernet** | W5500 Ethernet shield (CS pin 10) |
+| **Microcontroller** | Arduino Nano R4 for the current repository sketch; the separate installed Nano Every versions are described above |
+| **Motor control** | Servo signal output on pin 3 |
+| **Ethernet interface** | SPI Ethernet interface, chip-select pin 10 |
 | **IR Receiver** | 38kHz IR receiver module (pin 5) |
 | **Button** | Tactile pushbutton (pin 2) |
 | **LED** | Status indicator (pin 4) |
-| **Power** | 5V dedicated supply (servo), isolated from Arduino USB |
-| **Umbilical** | 50-foot XLR cable (PWM signal + ground) |
+| **Serial** | USB serial console at 1,000,000 baud |
 
-### Power Architecture
-
-Split power design prevents brownouts:
-- **Servo power**: dedicated 5V/4A supply
-- **Arduino power**: USB or separate 5V supply
-- **Common ground**: tied at the Arduino GND pin
-
-The servo's 50-foot umbilical cable carries the PWM signal (pin 3) and ground return to the tech table.
+Pin definitions describe the tracked sketch, not a verified wiring diagram for
+each installed board. Confirm the board, Ethernet hardware, power supply, and
+wiring against the actual installation before connecting or uploading firmware.
 
 ## Network Communication
 
@@ -74,11 +85,15 @@ Suggested hardware checks: compare short and long fade times, repeatedly retarge
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |
 |----------|-------|------------------|
-| `/dowser/state/angle` | `int` (0-180°) | 20Hz during motion, 1Hz static |
-| `/dowser/state/isUp` | `0\|1` | On state change |
-| `/dowser/state/isDown` | `0\|1` | On state change |
-| `/cue/DOWSER_STATUS/notes` | `string` (angle) | On position change |
-| `/cue/DOWSER_STATUS/name` | `string` (angle) | On position change |
+| `/dowser/state/angle` | `int` (0-180°) | On position changes and periodic refresh |
+| `/dowser/state/isUp` | `0\|1` | Sent with each state update |
+| `/dowser/state/isDown` | `0\|1` | Sent with each state update |
+| `/cue/DOWSER_STATUS/notes` | `string` (angle) | Sent with each state update |
+| `/cue/DOWSER_STATUS/name` | `string` (angle) | Sent with each state update |
+
+The sketch sends position-change updates and periodic status refreshes. It also
+sends a separate configurable heartbeat (4 seconds with factory defaults).
+These are not guaranteed fixed-rate streams.
 
 ### Telemetry Modes
 
@@ -101,7 +116,10 @@ Broadcasts to all hosts on the local subnet (`.255` address). Ideal for:
 - Multi-subscriber setups (QLab + Companion simultaneously)
 - Single-subnet deployments
 
-### Default Configuration
+### Factory Defaults
+
+These values are written when the sketch finds an unrecognized EEPROM marker.
+Saved EEPROM settings may differ.
 
 ```
 Boot Profile       : STATIC IP (10.0.0.100)
@@ -129,20 +147,28 @@ All codes specific to your remote model:
 
 | Button | Code | Action |
 |--------|------|--------|
-| Up Arrow | `0xF609FF00` | Move to "up" position |
-| Down Arrow | `0xF807FF00` | Move to "down" position |
+| Up Arrow | `0xF609FF00` | Move to local `up` target |
+| Down Arrow | `0xF807FF00` | Move to local `down` target |
 | Right (Vol+) | `0xB946FF00` | Increment +1° |
 | Left (Vol−) | `0xEA15FF00` | Decrement −1° |
 | Preset Edit | `0xB847FF00` | Toggle edit mode |
 | Buttons [0-9] | `0xE916FF00` - `0xB54AFF00` | Call preset [0-9] or save (in edit mode) |
 | Play/Pause | `0xBF40FF00` | Pause/resume toggle |
 | Power | `0xF20DFF00` | Detach servo (soft-disable) |
-| Plus/Minus buttons | Various | Fine adjustments (±5°) |
+| Plus | `0xBC43FF00` | Increment +5° |
+| Minus | `0xBB44FF00` | Decrement −5° |
 
 **Edit Mode Workflow**:
-1. Press **Preset Edit** → `editPos=true`, ready to save
-2. Press any **[0-9] button** → saves current servo angle to that preset slot
-3. Press **Preset Edit** again to exit edit mode
+1. Press **Preset Edit** to enter edit mode.
+2. The first number-button press arms preset editing; press a number button
+   again to save the current angle to that button's preset slot.
+3. Press **Preset Edit** again to exit edit mode.
+
+In this sketch, local `up` and `down` are initialized from `config.posDown` and
+`config.posUp`, respectively. The IR labels and physical-button toggle
+therefore use the opposite preset fields from OSC `/dowser/up` and
+`/dowser/down`. Verify direction on the installed mechanism before relying on
+those local controls.
 
 ### 3. **Serial Console (USB, 1Mbaud)**
 Connect via USB for direct serial command interface:
@@ -190,11 +216,10 @@ telnet 10.0.0.100 23       # Windows/Linux
 Native OSC protocol for QLab, Companion, or any OSC controller:
 
 ```python
-# Example Python OSC client
-import pythonosc.osc_message_builder as osm
-from pythonosc.udp_client import SimpleUDpClient
+# Example Python OSC client (requires python-osc)
+from pythonosc.udp_client import SimpleUDPClient
 
-client = SimpleUdpClient("10.0.0.100", 8001)
+client = SimpleUDPClient("10.0.0.100", 8001)
 client.send_message("/dowser/angle", 135)   # Move to 135°
 client.send_message("/dowser/up", "")        # Move to up
 client.send_message("/dowser/query", "")     # Request state
@@ -237,7 +262,7 @@ loop()
 | `handleIRPreset()` | Save/recall preset positions |
 | `processTelnetConsole()` | Accept connections, handle Telnet input |
 | `initNetwork()` | Configure Ethernet (static or DHCP) |
-| `rebootDevice()` | Soft reset via watchdog timer |
+| `rebootDevice()` | Trigger a software reset |
 
 ### Configuration Structure
 
@@ -258,43 +283,45 @@ struct DeviceConfiguration {
   uint8_t posUp;                // Up preset angle (default 170°)
   uint8_t dnBound;              // Lower hard limit (default 7°)
   uint8_t upBound;              // Upper hard limit (default 173°)
-  uint8_t defaultPos;           // Boot power-on position (default 10°)
+  uint8_t defaultPos;           // Stored boot-position setting (default 10°)
   uint8_t irPresets[10];        // IR preset angles [0-9]
   uint16_t defaultFadeTimeMs;   // Default movement duration (default 3000 ms)
 };
 ```
 
-Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (1-60), and stored to the nearest millisecond.
+Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (1-60), and stored to the nearest millisecond. Although `defaultPos` is loaded, the current setup code replaces the startup target before the servo is attached; see the startup sequence below.
 
 ## Dependency Libraries
 
-Install via Arduino IDE Library Manager:
+The tracked sketch includes these headers:
 
 - **SPI** (built-in)
-- **Ethernet** (built-in, W5500 support)
+- **Ethernet**
 - **EthernetUdp** (built-in)
 - **Servo** (built-in)
 - **EEPROM** (built-in)
-- **avr/wdt.h** (built-in, watchdog)
-- **[ArduinoOSC](https://github.com/h4arts/ArduinoOSC)** – OSC message codec
+- **OSCMessage.h** – OSC message codec compatible with the sketch's API
 - **[IRremote](https://github.com/Arduino-IRremote/Arduino-IRremote)** – IR decoder (v4.x)
+
+Install board-core and library versions compatible with the Nano R4 and these
+headers. The original OSC firmware on the second Nano Every may have different
+build requirements.
 
 ## Getting Started
 
 ### 1. Hardware Setup
-- Assemble Arduino Nano Every or Nano R4 + W5500 Ethernet shield (CS on pin 10)
-- Connect servo to pin 3 (PWM signal)
-- Connect IR receiver to pin 5
-- Connect button to pin 2
-- Connect LED to pin 4 (cathode to GND, anode through 220Ω resistor)
-- Power servo from dedicated 5V supply, ground tied to Arduino GND
+- The tracked sketch uses servo signal pin 3, Ethernet chip-select pin 10,
+  IR receiver pin 5, button pin 2, and LED pin 4.
+- Use hardware and power wiring compatible with the selected Nano R4 and
+  Ethernet interface. The source tree does not define a verified wiring or
+  power diagram for the installed boards.
 
 ### 2. Flash Firmware
-1. Install Arduino IDE 2.0+
+1. Install Arduino IDE 2.0+ and Nano R4 board support
 2. Install all required libraries (see above)
 3. Update `mac[]` to a unique address on your network (if needed)
 4. Update IR remote codes in `translateIRCommand()` to match your remote
-5. Open `firmware/Nano_Dowser_OSC_4_Companion/Nano_Dowser_OSC_4_Companion.ino` and upload
+5. Open `firmware/Dowser_Nano_5/Dowser_Nano_5.ino` and upload to the Nano R4
 
 ### 3. Initial Configuration
 - **USB Serial**: Connect, send `show` to verify defaults
@@ -303,22 +330,25 @@ Install via Arduino IDE Library Manager:
 - **IR test**: Press remote buttons and watch serial output for codes
 
 ### 4. QLab Integration
-Background notes on the earlier QLab and macOS serial integration are in [`docs/project-overview.md`](docs/project-overview.md).
+Historical notes on earlier QLab and macOS serial integration are in
+[`docs/project-overview.md`](docs/project-overview.md); they do not describe
+the current Nano R4 sketch's complete deployed setup.
 
 ### 5. Companion Integration
-OSC design and Companion-related troubleshooting notes are in [`docs/conversation-overview-gemini.md`](docs/conversation-overview-gemini.md).
+Historical OSC and Companion troubleshooting notes are in
+[`docs/conversation-overview-gemini.md`](docs/conversation-overview-gemini.md);
+check the current sketch and installed board before applying them.
 
 ## Default Startup Sequence
 
 On power-up or reboot:
 1. Serial baud rate set to 1Mbaud
 2. EEPROM loaded; legacy markers `0x53` and `0x55` migrate to `0x56`; unknown markers trigger factory reset
-3. Ethernet initialized (static IP or DHCP fallback)
-4. Telnet server begins listening on port 23
-5. Servo attaches to pin 3, moves to `config.defaultPos` (10°)
-6. IR receiver starts on pin 5
-7. Telemetry routing evaluated (mode 2 = subnet broadcast)
-8. System ready; listening for OSC on port 8001
+3. Ethernet is initialized (static IP or DHCP fallback); UDP and Telnet start only if Ethernet hardware is detected
+4. The servo attaches to pin 3 and is commanded to `config.posUp` (170° with factory defaults). Although `config.defaultPos` is loaded earlier, setup overwrites the target before attaching the servo.
+5. IR receiver starts on pin 5
+6. Telemetry routing is evaluated (mode 2 = subnet broadcast with factory defaults)
+7. System ready; listens for OSC on the configured local port (8001 with factory defaults)
 
 ## Troubleshooting
 
@@ -329,9 +359,8 @@ On power-up or reboot:
 - Check telemetry mode: `show` command (should be 2 by default)
 
 ### Servo moves erratically
-- Verify servo is powered by dedicated 5V supply
-- Check for USB power interference (separate power supplies if possible)
-- Verify pin 3 signal integrity over the 50-foot XLR cable
+- Verify the installed motor power and ground wiring
+- Check the pin 3 signal path and connections
 - Test servo response time with direct Arduino PWM control
 
 ### IR remote not responding
@@ -349,7 +378,7 @@ On power-up or reboot:
 ### Configuration lost after power cycle
 - Verify `save` command was sent before powering down
 - Check EEPROM health: may need chip replacement if corrupted
-- Force factory reset by sending `/dowser/config/queryAll` immediately after boot
+- `/dowser/config/queryAll` reports settings; it does not reset configuration
 
 ## Roadmap / Future Enhancements
 
@@ -381,12 +410,15 @@ Projector-Dowser/
 │   ├── conversation-overview-gemini.md
 │   └── project-overview.md
 ├── firmware/
-│   ├── Nano_Dowser_OSC_4_Companion/
-│   │   └── Nano_Dowser_OSC_4_Companion.ino  # Main firmware
+│   ├── Dowser_Nano_5/
+│   │   └── Dowser_Nano_5.ino           # Current repository sketch
+│   ├── Nano_Dowser_OSC_4_Speed-Edits/
+│   │   └── Nano_Dowser_OSC_4_Companion_v2-speed.ino
 │   └── archived/
 │       ├── README.md                   # Archived sketch comparison
-│       └── ...                         # Earlier and experimental sketches
+│       └── ...                         # Earlier sketches
 ```
 
 See [`firmware/archived/README.md`](firmware/archived/README.md) for a feature
-comparison and notes on the archived firmware variants.
+comparison of archived firmware. The pre-repository OSC firmware currently
+installed on the second Nano Every is not identified as a separate tracked file.

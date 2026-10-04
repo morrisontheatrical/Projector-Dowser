@@ -371,5 +371,10 @@ Projector-Dowser/
 ├── firmware/
 │   ├── Nano_Dowser_OSC_4_Companion/
 │   │   └── Nano_Dowser_OSC_4_Companion.ino  # Main firmware
-│   └── archived/                       # Earlier and experimental sketches
+│   └── archived/
+│       ├── README.md                   # Archived sketch comparison
+│       └── ...                         # Earlier and experimental sketches
 ```
+
+See [`firmware/archived/README.md`](firmware/archived/README.md) for a feature
+comparison and notes on the archived firmware variants.

@@ -50,11 +50,14 @@ uint8_t activeMoveDistance;
 unsigned long lastMoveUpdateMicros = 0;
 unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
+DeviceConfiguration persistedConfig;
+unsigned long configDirtySince = 0;
+const unsigned long CONFIG_AUTOSAVE_DELAY_MS = 3000;
 
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
-const uint16_t DEFAULT_FADE_TIME_MS = 3000;
+const uint16_t DEFAULT_FADE_TIME_MS = 1000;
 const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
 const unsigned long MICROSECONDS_PER_MILLISECOND = 1000UL;
@@ -113,8 +116,11 @@ void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
 void initNetwork();
 void loadConfiguration();
+void autosaveConfiguration();
 void parseSerialIP(char* inputStr, uint8_t* ipArray);
 void processTelnetConsole();
+void beginWebServer();
+void processWebServer();
 void processSerialConsole();
 void processPhysicalButton();
 void processIRInput();
@@ -156,6 +162,7 @@ void setup() {
     initNetwork();
     Udp.begin(config.localPort);
     telnetServer.begin();
+    beginWebServer();
   } else {
     Serial.println(F("Ethernet hardware not found - network disabled"));
   }
@@ -198,6 +205,8 @@ void loop() {
 
   processIncomingOSC();
   processTelnetConsole();
+  processWebServer();
+  autosaveConfiguration();
   processSerialConsole();
   processPhysicalButton();
   processIRInput();
@@ -837,7 +846,7 @@ void loadConfiguration() {
 
   if (config.magicNumber != EEPROM_MAGIC_V3) {
     config.magicNumber = EEPROM_MAGIC_V3;
-    config.preferStatic = 1;
+    config.preferStatic = 0;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
     config.staticIP[2] = 0;
@@ -873,6 +882,26 @@ void loadConfiguration() {
   } else if (!isValidFadeTime(config.defaultFadeTimeMs)) {
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     EEPROM.put(0, config);
+  }
+  persistedConfig = config;
+}
+
+// Persists config changes once they have been stable for CONFIG_AUTOSAVE_DELAY_MS,
+// so rapid edits cost a single write. Settings like IP/ports still apply after reboot.
+void autosaveConfiguration() {
+  if (memcmp(&config, &persistedConfig, sizeof(config)) == 0) {
+    configDirtySince = 0;
+    return;
+  }
+  unsigned long now = millis();
+  if (configDirtySince == 0) {
+    configDirtySince = now ? now : 1;
+    return;
+  }
+  if (now - configDirtySince >= CONFIG_AUTOSAVE_DELAY_MS) {
+    EEPROM.put(0, config);
+    persistedConfig = config;
+    configDirtySince = 0;
   }
 }
 

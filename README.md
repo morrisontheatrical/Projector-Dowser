@@ -245,6 +245,18 @@ client.send_message("/dowser/up", "")        # Move to up
 client.send_message("/dowser/query", "")     # Request state
 ```
 
+### 6. **Web UI (Ethernet, Port 80)**
+Browse to the device IP for a single-page control and configuration UI (served from flash by `WebServer.ino` / `web_page.h`). It has no authentication, so use it on trusted networks only.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Web UI |
+| `GET /api/status` | Position, target, moving state, IP |
+| `GET /api/config` | All settings as JSON |
+| `POST /api/move?to=up\|down\|<angle>[&fade=<sec>]` | Move |
+| `POST /api/config?key=value[&key=value]` | Set settings (same keys as the serial console; autosaved) |
+| `POST /api/reboot` | Save and reboot |
+
 ## Software Architecture
 
 ### Control Flow
@@ -305,11 +317,11 @@ struct DeviceConfiguration {
   uint8_t upBound;              // Upper hard limit (default 173°)
   uint8_t defaultPos;           // Stored boot-position setting (default 10°)
   uint8_t irPresets[10];        // IR preset angles [0-9]
-  uint16_t defaultFadeTimeMs;   // Default movement duration (default 3000 ms)
+  uint16_t defaultFadeTimeMs;   // Default movement duration (default 1000 ms)
 };
 ```
 
-Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (0-60), and stored to the nearest millisecond. Although `defaultPos` is loaded, the current setup code replaces the startup target before the servo is attached; see the startup sequence below.
+Configuration changes are autosaved to EEPROM after 3 seconds without further edits (no reboot); `save` still writes immediately and reboots, which is needed for network changes to take effect. Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 1-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (0-60), and stored to the nearest millisecond. Although `defaultPos` is loaded, the current setup code replaces the startup target before the servo is attached; see the startup sequence below.
 
 ## Dependency Libraries
 

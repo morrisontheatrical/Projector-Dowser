@@ -181,8 +181,8 @@ void setup() {
 
   Serial.println(F("Attaching servo..."));
   myservo.attach(SERVO_PIN);
-  currentPos = down;
-  targetPos = down;
+  currentPos = constrain((int)config.defaultPos, (int)config.dnBound, (int)config.upBound);
+  targetPos = currentPos;
   activeMoveFadeTimeMs = config.defaultFadeTimeMs;
   myservo.write(currentPos);
   lastMoveUpdateMicros = micros();
@@ -1055,13 +1055,14 @@ void handleCommonConsoleCommands(char* input, Print& output) {
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
 #if defined(__AVR__)
-    output.println(F("<angle>, up, down, show, save, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
+    output.println(F("<angle>, up, down, show, save, reboot, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
 #else
     output.println(F("Commands:"));
     output.println(F("  <angle>        move to angle, e.g. 90"));
     output.println(F("  up / down      move to the saved up/down preset"));
     output.println(F("  show           print current settings"));
     output.println(F("  save           write settings to EEPROM and reboot"));
+    output.println(F("  reboot         restart without saving"));
     output.println(F("  key=value      change a setting (staged until save):"));
     output.println(F("    down, up, default      angles, e.g. up=120"));
     output.println(F("    dnbound, upbound       limits 0-180"));
@@ -1137,6 +1138,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     if (fractionalMs < 10) output.print('0');
     output.print(fractionalMs);
     output.println(F(" s"));
+    return;
+  }
+
+  if (strcasecmp(input, "reboot") == 0) {
+    dispatchMessage(source, F("Rebooting (unsaved changes discarded)"));
+    delay(300);
+    rebootDevice();
     return;
   }
 
@@ -1238,41 +1246,56 @@ void beginWebServer() {
   webServer.begin();
 }
 
-static const char WEB_PAGE[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
+static const char PAGE_HEAD[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Projector Dowser</title>
 <style>
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#121212;color:#e0e0e0;text-align:center;margin:0;padding:12px}
 .card{background:#1e1e1e;max-width:420px;margin:14px auto;padding:18px;border-radius:12px}
-h1{font-size:1.4rem;margin:0 0 8px;color:#fff}h2{font-size:1.1rem;margin:0 0 10px}
+h1{font-size:1.4rem;margin:0 0 8px;color:#fff}
+nav{max-width:420px;margin:0 auto;display:flex;gap:10px}
+nav a{flex:1;padding:10px;border-radius:6px;background:#2a2a2a;color:#aaa;text-decoration:none;font-weight:bold}
+nav a.on{background:#4CAF50;color:#fff}
 .stat{font-size:2.4rem;font-weight:bold;color:#4CAF50;margin:10px 0}.sub{font-size:.9rem;color:#888;margin-bottom:14px}
 .bg,.row{display:flex;gap:10px;margin-top:10px}
 button{flex:1;padding:12px;font-size:1rem;font-weight:bold;border:0;border-radius:6px;color:#fff;background:#555}
 .u{background:#2196F3}.d{background:#f44336}button:active{opacity:.7}
 label{display:flex;justify-content:space-between;align-items:center;margin:6px 0;font-size:.9rem;text-align:left}
-input,select{width:150px;padding:6px;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px}
+input{width:150px;padding:6px;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px}
 pre{text-align:left;font-size:.8rem;color:#aaa;white-space:pre-wrap}
 </style></head><body>
+<nav><a href="/" id="n1">Controls</a><a href="/config" id="n2">Config</a></nav>
+<script>
+function $(i){return document.getElementById(i)}
+function c(x){return fetch('/cmd?c='+encodeURIComponent(x)).then(function(r){return r.text()}).then(function(t){if(t.trim()&&$('out'))$('out').textContent=t;poll()})}
+</script>
+)HTML";
+
+static const char PAGE_CONTROLS[] PROGMEM = R"HTML(<script>$('n1').className='on'</script>
 <div class="card"><h1>Projector Dowser</h1>
 <div class="stat"><span id="pos">--</span>&deg;</div>
 <div class="sub">Status: <span id="pre">-</span> &middot; Target <span id="tgt">-</span>&deg;</div>
 <div class="bg"><button class="u" onclick="c('up')">Open (Up)</button><button class="d" onclick="c('down')">Close (Down)</button></div>
 <div class="row"><input id="ang" type="number" min="0" max="180" placeholder="Angle" style="flex:1"><button onclick="c(ang.value)">Go</button></div></div>
-<div class="card"><h2>Settings</h2><div id="cfg"></div>
+<script>
+function poll(){fetch('/status').then(function(r){return r.json()}).then(function(d){$('pos').textContent=d.pos;$('tgt').textContent=d.tgt;$('pre').textContent=d.pre}).catch(function(){})}
+poll();setInterval(poll,400);
+</script></body></html>)HTML";
+
+static const char PAGE_CONFIG[] PROGMEM = R"HTML(<script>$('n2').className='on'</script>
+<div class="card"><h1>Settings</h1><div id="cfg"></div>
 <div class="bg"><button onclick="stage()">Stage</button><button class="d" onclick="save()">Save &amp; Reboot</button></div>
-<pre id="out">Staged changes are applied live; Save writes them to EEPROM and reboots.</pre></div>
+<div class="bg"><button onclick="reboot()">Reboot (discard unsaved)</button></div>
+<pre id="out">Stage applies changes live; Save writes them to EEPROM and reboots.</pre></div>
 <script>
 var F=[["Lower bound","dnbound","dn"],["Upper bound","upbound","upb"],["Up angle","up","up"],["Down angle","down","down"],["Boot default","default","def"],["Fade (s)","fade","fade"],
 ["Local port","localport","lp"],["Target port 0","targetport0","tp0"],["Target port 1","targetport1","tp1"],["Target port 2","targetport2","tp2"],
 ["Telemetry (0 reply,1 fixed,2 bcast)","telemetry","tel"],["Heartbeat (0/1)","heartbeat","hb"],["Static IP mode (0/1)","static","st"],["Static IP","ip","ip"],["Target IP","targetip","tip"]];
-var orig={},built=0;
-function $(i){return document.getElementById(i)}
-function c(x){return fetch('/cmd?c='+encodeURIComponent(x)).then(function(r){return r.text()}).then(function(t){if(t.trim())$('out').textContent=t;poll()})}
-function build(d){var h='';F.forEach(function(f){h+='<label>'+f[0]+'<input id="k_'+f[1]+'"></label>'});$('cfg').innerHTML=h;fill(d);built=1}
-function fill(d){F.forEach(function(f){$('k_'+f[1]).value=d[f[2]];orig[f[1]]=String(d[f[2]])})}
-function poll(){fetch('/status').then(function(r){return r.json()}).then(function(d){$('pos').textContent=d.pos;$('tgt').textContent=d.tgt;$('pre').textContent=d.pre;if(!built)build(d)}).catch(function(){})}
-async function stage(){var o='';for(var i=0;i<F.length;i++){var k=F[i][1],v=$('k_'+k).value.trim();if(v!==orig[k]){o+=await fetch('/cmd?c='+encodeURIComponent(k+'='+v)).then(function(r){return r.text()});orig[k]=v}}$('out').textContent=o||'Staged.'}
+var orig={};
+function poll(){}
+fetch('/status').then(function(r){return r.json()}).then(function(d){var h='';F.forEach(function(f){h+='<label>'+f[0]+'<input id="k_'+f[1]+'"></label>'});$('cfg').innerHTML=h;F.forEach(function(f){$('k_'+f[1]).value=d[f[2]];orig[f[1]]=String(d[f[2]])})});
+async function stage(){var o='';for(var i=0;i<F.length;i++){var k=F[i][1],v=$('k_'+k).value.trim();if(v!==orig[k]){o+=await fetch('/cmd?c='+encodeURIComponent(k+'='+v)).then(function(r){return r.text()});orig[k]=v}}$('out').textContent=o||'No changes.'}
 async function save(){await stage();if(confirm('Save to EEPROM and reboot?')){c('save');$('out').textContent='Saved. Rebooting...'}}
-poll();setInterval(poll,400);
+function reboot(){if(confirm('Reboot and discard unsaved changes?')){c('reboot');$('out').textContent='Rebooting...'}}
 </script></body></html>)HTML";
 
 static void webSend(EthernetClient& client, const char* data, size_t len) {
@@ -1361,7 +1384,12 @@ void processWebServer() {
       client.print(F("HTTP/1.1 303 See Other\r\nLocation: /\r\nConnection: close\r\n\r\n"));
     } else if (strcmp(path, "/") == 0 || strncmp(path, "/?", 2) == 0) {
       webHeader(client, "text/html; charset=utf-8");
-      webSend(client, WEB_PAGE, strlen(WEB_PAGE));
+      webSend(client, PAGE_HEAD, strlen(PAGE_HEAD));
+      webSend(client, PAGE_CONTROLS, strlen(PAGE_CONTROLS));
+    } else if (strcmp(path, "/config") == 0) {
+      webHeader(client, "text/html; charset=utf-8");
+      webSend(client, PAGE_HEAD, strlen(PAGE_HEAD));
+      webSend(client, PAGE_CONFIG, strlen(PAGE_CONFIG));
     } else {
       client.print(F("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"));
     }

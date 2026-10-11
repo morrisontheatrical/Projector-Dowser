@@ -1,7 +1,20 @@
 # Projector Dowser
 
-Firmware and project notes for an Arduino-based projector dowser. The current
-repository sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
+Firmware and project notes for an Arduino/Teensy-based projector dowser. The primary
+sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
+
+## Platform Matrix
+
+| Board | Status | Network | Folder |
+|-------|--------|---------|--------|
+| Arduino Nano R4 | Primary | External W5500 (SPI) | [`firmware/Dowser_Nano_5`](firmware/Dowser_Nano_5/README.md) |
+| Arduino Nano Every | Active (condensed) | External W5500 (SPI) | [`firmware/Dowser_Nano-every_5c`](firmware/Dowser_Nano-every_5c/README.md) |
+| Teensy 4.1 | Active (first adaptation) | Native Ethernet (DP83825 PHY, QNEthernet) | [`firmware/teensy_dowser_1`](firmware/teensy_dowser_1/README.md) |
+| Elegoo Mega 2560 R3 | Archived | None | [`firmware/archived`](firmware/archived/README.md) |
+
+Pinouts, board packages, libraries, and network wiring are in each sketch folder's README. This file covers the
+shared OSC syntax and architecture, documented against the Nano R4 sketch. The Teensy build adds `bootmode`, a
+`reboot` command, and a two-page web UI; the Nano Every build omits the button, LED, and IR controls.
 
 ## Current Firmware and Installed Hardware
 
@@ -32,7 +45,7 @@ The Projector Dowser is a custom-built theatrical automation device that:
 
 | Component | Specification |
 |-----------|---------------|
-| **Microcontroller** | Arduino Nano R4 for the current repository sketch; compatible with Nano Every |
+| **Microcontroller** | Arduino Nano R4 (primary); see the Platform Matrix for the Nano Every and Teensy 4.1 variants |
 | **Motor control** | Servo signal output on pin 3 |
 | **Ethernet interface** | SPI Ethernet interface, chip-select pin 10 |
 | **IR Receiver** | IR receiver input (pin 5; remote protocol/codes depend on the remote) |

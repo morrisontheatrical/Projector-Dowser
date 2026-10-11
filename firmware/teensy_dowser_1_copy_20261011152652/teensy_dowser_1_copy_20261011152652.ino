@@ -48,6 +48,8 @@ struct DeviceConfiguration {
   uint8_t irPresets[10];
   // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
   uint16_t defaultFadeTimeMs;
+  uint8_t bootMode;  // 0 = boot to defaultPos, 1 = boot to lastPos
+  uint8_t lastPos;   // last settled servo position
 };
 
 int targetPos;
@@ -65,6 +67,7 @@ const unsigned long CONFIG_AUTOSAVE_DELAY_MS = 3000;
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
+const uint8_t EEPROM_MAGIC_V4 = 0x57;
 const uint16_t DEFAULT_FADE_TIME_MS = 1000;
 const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
@@ -181,7 +184,8 @@ void setup() {
 
   Serial.println(F("Attaching servo..."));
   myservo.attach(SERVO_PIN);
-  currentPos = constrain((int)config.defaultPos, (int)config.dnBound, (int)config.upBound);
+  int bootPos = (config.bootMode == 1) ? config.lastPos : config.defaultPos;
+  currentPos = constrain(bootPos, (int)config.dnBound, (int)config.upBound);
   targetPos = currentPos;
   activeMoveFadeTimeMs = config.defaultFadeTimeMs;
   myservo.write(currentPos);
@@ -225,6 +229,7 @@ void loop() {
   processPhysicalButton();
   processIRInput();
   updateServo();
+  if (currentPos == targetPos && config.lastPos != currentPos) config.lastPos = (uint8_t)currentPos;
 
   if (config.heartbeatEnabled == 1) {
     if (millis() - lastHeartbeatTime >= config.heartbeatInterval) {
@@ -855,8 +860,10 @@ void handleIRPreset(int num) {
 void loadConfiguration() {
   EEPROM.get(0, config);
   if (config.magicNumber == EEPROM_MAGIC_V1) {
-    config.magicNumber = EEPROM_MAGIC_V3;
+    config.magicNumber = EEPROM_MAGIC_V4;
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+    config.bootMode = 0;
+    config.lastPos = config.defaultPos;
     EEPROM.put(0, config);
     return;
   }
@@ -864,7 +871,9 @@ void loadConfiguration() {
   if (config.magicNumber == EEPROM_MAGIC_V2) {
     // The V2 field's low byte contains its former one-byte speed setting.
     uint8_t legacySpeed = (uint8_t)config.defaultFadeTimeMs;
-    config.magicNumber = EEPROM_MAGIC_V3;
+    config.magicNumber = EEPROM_MAGIC_V4;
+    config.bootMode = 0;
+    config.lastPos = config.defaultPos;
     if (legacySpeed >= 1 && legacySpeed <= 100) {
       unsigned long migratedFadeTimeMs = 100000UL / legacySpeed;
       if (migratedFadeTimeMs < MIN_FADE_TIME_MS) migratedFadeTimeMs = MIN_FADE_TIME_MS;
@@ -877,8 +886,17 @@ void loadConfiguration() {
     return;
   }
 
-  if (config.magicNumber != EEPROM_MAGIC_V3) {
-    config.magicNumber = EEPROM_MAGIC_V3;
+  if (config.magicNumber == EEPROM_MAGIC_V3) {
+    config.magicNumber = EEPROM_MAGIC_V4;
+    config.bootMode = 0;
+    config.lastPos = config.defaultPos;
+    EEPROM.put(0, config);
+  }
+
+  if (config.magicNumber != EEPROM_MAGIC_V4) {
+    config.magicNumber = EEPROM_MAGIC_V4;
+    config.bootMode = 0;
+    config.lastPos = 10;
     config.preferStatic = 0;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
@@ -1065,6 +1083,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.println(F("  reboot         restart without saving"));
     output.println(F("  key=value      change a setting (staged until save):"));
     output.println(F("    down, up, default      angles, e.g. up=120"));
+    output.println(F("    bootmode               0 = boot to default, 1 = boot to last position"));
     output.println(F("    dnbound, upbound       limits 0-180"));
     output.println(F("    fade                   seconds 0-60, e.g. fade=0.4"));
     output.println(F("    localport, targetport[0-2]"));
@@ -1130,6 +1149,8 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(F("Current Position: "));
     output.print(currentPos);
     output.println(F(" deg"));
+    output.print(F("Boot Mode     : "));
+    output.println(config.bootMode == 1 ? F("LAST POSITION") : F("DEFAULT POSITION"));
     output.print(F("Default Fade  : "));
     output.print(config.defaultFadeTimeMs / 1000);
     output.print('.');
@@ -1193,6 +1214,13 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     if (val >= 0 && val <= 180) {
       config.upBound = val;
       dispatchMessage(source, F("Set Hi-Bound -> "), val);
+    }
+  } else if (parseKeyValue(input, "bootmode", val)) {
+    if (val == 0 || val == 1) {
+      config.bootMode = val;
+      dispatchMessage(source, val ? F("Boot Mode -> Last Position") : F("Boot Mode -> Default Position"));
+    } else {
+      output.println(F("Error: bootmode 0 = default position, 1 = last position"));
     }
   } else if (parseKeyValue(input, "default", val)) {
     if (val >= config.dnBound && val <= config.upBound) {
@@ -1287,7 +1315,7 @@ static const char PAGE_CONFIG[] PROGMEM = R"HTML(<script>$('n2').className='on'<
 <div class="bg"><button onclick="reboot()">Reboot (discard unsaved)</button></div>
 <pre id="out">Stage applies changes live; Save writes them to EEPROM and reboots.</pre></div>
 <script>
-var F=[["Lower bound","dnbound","dn"],["Upper bound","upbound","upb"],["Up angle","up","up"],["Down angle","down","down"],["Boot default","default","def"],["Fade (s)","fade","fade"],
+var F=[["Lower bound","dnbound","dn"],["Upper bound","upbound","upb"],["Up angle","up","up"],["Down angle","down","down"],["Boot default","default","def"],["Boot mode (0 default,1 last)","bootmode","bm"],["Fade (s)","fade","fade"],
 ["Local port","localport","lp"],["Target port 0","targetport0","tp0"],["Target port 1","targetport1","tp1"],["Target port 2","targetport2","tp2"],
 ["Telemetry (0 reply,1 fixed,2 bcast)","telemetry","tel"],["Heartbeat (0/1)","heartbeat","hb"],["Static IP mode (0/1)","static","st"],["Static IP","ip","ip"],["Target IP","targetip","tip"]];
 var orig={};
@@ -1331,11 +1359,11 @@ static void webStatusJson(EthernetClient& client) {
   char buf[400];
   uint16_t ms = config.defaultFadeTimeMs;
   snprintf(buf, sizeof(buf),
-           "{\"pos\":%d,\"tgt\":%d,\"pre\":\"%s\",\"up\":%d,\"down\":%d,\"dn\":%d,\"upb\":%d,\"def\":%d,"
+           "{\"pos\":%d,\"tgt\":%d,\"pre\":\"%s\",\"up\":%d,\"down\":%d,\"dn\":%d,\"upb\":%d,\"def\":%d,\"bm\":%d,"
            "\"fade\":\"%u.%03u\",\"lp\":%u,\"tp0\":%u,\"tp1\":%u,\"tp2\":%u,\"tel\":%d,\"hb\":%d,\"st\":%d,"
            "\"ip\":\"%d.%d.%d.%d\",\"tip\":\"%d.%d.%d.%d\"}",
            currentPos, targetPos, currentPresetName, config.posUp, config.posDown, config.dnBound, config.upBound,
-           config.defaultPos, ms / 1000, ms % 1000, config.localPort, config.targetPorts[0], config.targetPorts[1],
+           config.defaultPos, config.bootMode, ms / 1000, ms % 1000, config.localPort, config.targetPorts[0], config.targetPorts[1],
            config.targetPorts[2], config.telemetryMode, config.heartbeatEnabled, config.preferStatic,
            config.staticIP[0], config.staticIP[1], config.staticIP[2], config.staticIP[3],
            config.fixedTargetIP[0], config.fixedTargetIP[1], config.fixedTargetIP[2], config.fixedTargetIP[3]);

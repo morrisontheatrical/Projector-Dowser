@@ -72,8 +72,7 @@ const unsigned long MICROSECONDS_PER_MILLISECOND = 1000UL;
 // Covers the common 20 ms loop interval while limiting catch-up after blocking operations.
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
 const unsigned long MAX_MOVEMENT_DISTANCE_DEGREES = 180UL;
-static_assert((unsigned long long)MAX_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND +
-                (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES <= 0xFFFFFFFFULL,
+static_assert((unsigned long long)MAX_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND + (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
 
 int down;
@@ -797,12 +796,12 @@ void processIRInput() {
     // Check if the signal is valid (not a repeat code suppression or error)
     if (IrReceiver.decodedIRData.protocol != UNKNOWN) {
       unsigned long IRData = IrReceiver.decodedIRData.decodedRawData;
-      if (IRData != 0) { 
-        translateIRCommand(IRData); 
+      if (IRData != 0) {
+        translateIRCommand(IRData);
       }
     }
     // Required in v4 to clear the buffer and ready the receiver for the next press
-    IrReceiver.resume(); 
+    IrReceiver.resume();
   }
 }
 void translateIRCommand(unsigned long IRData) {
@@ -1042,8 +1041,7 @@ bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
   }
 
   while (isspace((unsigned char)*value)) value++;
-  if (!hasDigit || *value != '\0' ||
-      (wholeSeconds == 60 && hasNonZeroFraction)) return false;
+  if (!hasDigit || *value != '\0' || (wholeSeconds == 60 && hasNonZeroFraction)) return false;
 
   unsigned int totalMs = wholeSeconds * 1000 + fractionalMs + (roundUp ? 1 : 0);
   if (!isValidFadeTime(totalMs)) return false;
@@ -1056,9 +1054,9 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   int val;
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
-  #if defined(__AVR__)
+#if defined(__AVR__)
     output.println(F("<angle>, up, down, show, save, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
-  #else
+#else
     output.println(F("Commands:"));
     output.println(F("  <angle>        move to angle, e.g. 90"));
     output.println(F("  up / down      move to the saved up/down preset"));
@@ -1071,7 +1069,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.println(F("    localport, targetport[0-2]"));
     output.println(F("    static (0/1), telemetry, heartbeat (0/1)"));
     output.println(F("    ip, targetip           e.g. ip=192.168.1.50"));
-  #endif
+#endif
     return;
   }
 
@@ -1165,6 +1163,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     } else {
       output.println(F("Syntax: targetport[0-2]=XXXX"));
     }
+    return;
   }
 
   if (parseKeyValue(input, "down", val)) {
@@ -1239,90 +1238,140 @@ void beginWebServer() {
   webServer.begin();
 }
 
+static const char WEB_PAGE[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Projector Dowser</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#121212;color:#e0e0e0;text-align:center;margin:0;padding:12px}
+.card{background:#1e1e1e;max-width:420px;margin:14px auto;padding:18px;border-radius:12px}
+h1{font-size:1.4rem;margin:0 0 8px;color:#fff}h2{font-size:1.1rem;margin:0 0 10px}
+.stat{font-size:2.4rem;font-weight:bold;color:#4CAF50;margin:10px 0}.sub{font-size:.9rem;color:#888;margin-bottom:14px}
+.bg,.row{display:flex;gap:10px;margin-top:10px}
+button{flex:1;padding:12px;font-size:1rem;font-weight:bold;border:0;border-radius:6px;color:#fff;background:#555}
+.u{background:#2196F3}.d{background:#f44336}button:active{opacity:.7}
+label{display:flex;justify-content:space-between;align-items:center;margin:6px 0;font-size:.9rem;text-align:left}
+input,select{width:150px;padding:6px;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px}
+pre{text-align:left;font-size:.8rem;color:#aaa;white-space:pre-wrap}
+</style></head><body>
+<div class="card"><h1>Projector Dowser</h1>
+<div class="stat"><span id="pos">--</span>&deg;</div>
+<div class="sub">Status: <span id="pre">-</span> &middot; Target <span id="tgt">-</span>&deg;</div>
+<div class="bg"><button class="u" onclick="c('up')">Open (Up)</button><button class="d" onclick="c('down')">Close (Down)</button></div>
+<div class="row"><input id="ang" type="number" min="0" max="180" placeholder="Angle" style="flex:1"><button onclick="c(ang.value)">Go</button></div></div>
+<div class="card"><h2>Settings</h2><div id="cfg"></div>
+<div class="bg"><button onclick="stage()">Stage</button><button class="d" onclick="save()">Save &amp; Reboot</button></div>
+<pre id="out">Staged changes are applied live; Save writes them to EEPROM and reboots.</pre></div>
+<script>
+var F=[["Lower bound","dnbound","dn"],["Upper bound","upbound","upb"],["Up angle","up","up"],["Down angle","down","down"],["Boot default","default","def"],["Fade (s)","fade","fade"],
+["Local port","localport","lp"],["Target port 0","targetport0","tp0"],["Target port 1","targetport1","tp1"],["Target port 2","targetport2","tp2"],
+["Telemetry (0 reply,1 fixed,2 bcast)","telemetry","tel"],["Heartbeat (0/1)","heartbeat","hb"],["Static IP mode (0/1)","static","st"],["Static IP","ip","ip"],["Target IP","targetip","tip"]];
+var orig={},built=0;
+function $(i){return document.getElementById(i)}
+function c(x){return fetch('/cmd?c='+encodeURIComponent(x)).then(function(r){return r.text()}).then(function(t){if(t.trim())$('out').textContent=t;poll()})}
+function build(d){var h='';F.forEach(function(f){h+='<label>'+f[0]+'<input id="k_'+f[1]+'"></label>'});$('cfg').innerHTML=h;fill(d);built=1}
+function fill(d){F.forEach(function(f){$('k_'+f[1]).value=d[f[2]];orig[f[1]]=String(d[f[2]])})}
+function poll(){fetch('/status').then(function(r){return r.json()}).then(function(d){$('pos').textContent=d.pos;$('tgt').textContent=d.tgt;$('pre').textContent=d.pre;if(!built)build(d)}).catch(function(){})}
+async function stage(){var o='';for(var i=0;i<F.length;i++){var k=F[i][1],v=$('k_'+k).value.trim();if(v!==orig[k]){o+=await fetch('/cmd?c='+encodeURIComponent(k+'='+v)).then(function(r){return r.text()});orig[k]=v}}$('out').textContent=o||'Staged.'}
+async function save(){await stage();if(confirm('Save to EEPROM and reboot?')){c('save');$('out').textContent='Saved. Rebooting...'}}
+poll();setInterval(poll,400);
+</script></body></html>)HTML";
+
+static void webSend(EthernetClient& client, const char* data, size_t len) {
+#if defined(USE_QNETHERNET)
+  client.writeFully((const uint8_t*)data, len);
+#else
+  client.write((const uint8_t*)data, len);
+#endif
+}
+
+static void webHeader(EthernetClient& client, const char* type) {
+  client.print(F("HTTP/1.1 200 OK\r\nContent-Type: "));
+  client.print(type);
+  client.print(F("\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"));
+}
+
+static void urlDecode(char* s) {
+  char* o = s;
+  while (*s) {
+    if (*s == '%' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
+      char h[3] = { s[1], s[2], 0 };
+      *o++ = (char)strtol(h, NULL, 16);
+      s += 3;
+    } else {
+      *o++ = (*s == '+') ? ' ' : *s;
+      s++;
+    }
+  }
+  *o = '\0';
+}
+
+static void webStatusJson(EthernetClient& client) {
+  char buf[400];
+  uint16_t ms = config.defaultFadeTimeMs;
+  snprintf(buf, sizeof(buf),
+           "{\"pos\":%d,\"tgt\":%d,\"pre\":\"%s\",\"up\":%d,\"down\":%d,\"dn\":%d,\"upb\":%d,\"def\":%d,"
+           "\"fade\":\"%u.%03u\",\"lp\":%u,\"tp0\":%u,\"tp1\":%u,\"tp2\":%u,\"tel\":%d,\"hb\":%d,\"st\":%d,"
+           "\"ip\":\"%d.%d.%d.%d\",\"tip\":\"%d.%d.%d.%d\"}",
+           currentPos, targetPos, currentPresetName, config.posUp, config.posDown, config.dnBound, config.upBound,
+           config.defaultPos, ms / 1000, ms % 1000, config.localPort, config.targetPorts[0], config.targetPorts[1],
+           config.targetPorts[2], config.telemetryMode, config.heartbeatEnabled, config.preferStatic,
+           config.staticIP[0], config.staticIP[1], config.staticIP[2], config.staticIP[3],
+           config.fixedTargetIP[0], config.fixedTargetIP[1], config.fixedTargetIP[2], config.fixedTargetIP[3]);
+  client.print(buf);
+}
+
 void processWebServer() {
   if (!networkAvailable) return;
 
   EthernetClient client = webServer.available();
-  if (client) {
-    // Basic HTTP request reader
-    String currentLine = "";
-    boolean currentLineIsBlank = true;
-    unsigned long clientTimeout = millis();
+  if (!client) return;
 
-    while (client.connected() && millis() - clientTimeout < 2000) {
-      if (client.available()) {
-        char c = client.read();
-        clientTimeout = millis(); // Reset timeout on activity
-
-        if (c == '\n' && currentLineIsBlank) {
-          // --- HTTP RESPONSE HEADERS ---
-          client.println(F("HTTP/1.1 200 OK"));
-          client.println(F("Content-Type: text/html; charset=utf-8"));
-          client.println(F("Connection: close"));
-          client.println();
-
-          // --- HTML DASHBOARD BODY ---
-          client.println(F("<!DOCTYPE html><html><head>"));
-          client.println(F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
-          client.println(F("<meta http-equiv=\"refresh\" content=\"3\">")); // Auto-refresh every 3s for status updates
-          client.println(F("<title>Projector Dowser Control</title>"));
-          client.println(F("<style>"));
-          client.println(F("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #121212; color: #e0e0e0; text-align: center; margin: 0; padding: 20px; }"));
-          client.println(F(".card { background: #1e1e1e; max-width: 400px; margin: 20px auto; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }"));
-          client.println(F("h1 { font-size: 1.4rem; color: #fff; margin-bottom: 10px; }"));
-          client.println(F(".stat { font-size: 2.2rem; font-weight: bold; color: #4CAF50; margin: 15px 0; }"));
-          client.println(F(".sub { font-size: 0.9rem; color: #888; margin-bottom: 20px; }"));
-          client.println(F(".btn-group { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }"));
-          client.println(F("a.btn { flex: 1; padding: 12px; font-size: 1rem; font-weight: bold; text-decoration: none; border-radius: 6px; color: white; transition: opacity 0.2s; }"));
-          client.println(F(".btn-up { background: #2196F3; }"));
-          client.println(F(".btn-down { background: #f44336; }"));
-          client.println(F("a.btn:active { opacity: 0.8; }"));
-          client.println(F("</style></head><body>"));
-
-          client.println(F("<div class=\"card\">"));
-          client.println(F("<h1>Projector Dowser</h1>"));
-          
-          // Current Position Status
-          client.print(F("<div class=\"stat\">"));
-          client.print(currentPos);
-          client.println(F("&deg;</div>"));
-
-          // Preset / State label
-          client.print(F("<div class=\"sub\">Status: "));
-          client.print(currentPresetName);
-          client.println(F("</div>"));
-
-          // Control Buttons
-          client.println(F("<div class=\"btn-group\">"));
-          client.println(F("<a class=\"btn btn-up\" href=\"/up\">Open (Up)</a>"));
-          client.println(F("<a class=\"btn btn-down\" href=\"/down\">Close (Down)</a>"));
-          client.println(F("</div>"));
-
-          client.println(F("</div></body></html>"));
-          break;
-        }
-
-        if (c == '\n') {
-          currentLineIsBlank = true;
-        } else if (c != '\r') {
-          currentLineIsBlank = false;
-          // Check for incoming trigger paths in the HTTP request line
-          if (currentLine.startsWith("GET /up")) {
-            setMovementTargetAtDefaultFadeTime(config.posUp);
-          } else if (currentLine.startsWith("GET /down")) {
-            setMovementTargetAtDefaultFadeTime(config.posDown);
-          }
-          currentLine += c;
-        }
-      }
+  // Read only the request line, then drop the remaining headers.
+  char req[128];
+  size_t n = 0;
+  bool lineDone = false;
+  unsigned long start = millis();
+  while (client.connected() && millis() - start < 250) {
+    if (!client.available()) continue;
+    char c = client.read();
+    if (c == '\n') {
+      lineDone = true;
+      break;
     }
-    delay(1); // Give the web client time to receive data
-    client.stop();
+    if (c != '\r' && n < sizeof(req) - 1) req[n++] = c;
   }
+  req[n] = '\0';
+
+  if (lineDone && strncmp(req, "GET ", 4) == 0) {
+    char* path = req + 4;
+    char* end = strchr(path, ' ');
+    if (end) *end = '\0';
+
+    if (strncmp(path, "/status", 7) == 0) {
+      webHeader(client, "application/json");
+      webStatusJson(client);
+    } else if (strncmp(path, "/cmd?c=", 7) == 0) {
+      char* cmd = path + 7;
+      urlDecode(cmd);
+      cmd[47] = '\0';
+      webHeader(client, "text/plain");
+      handleCommonConsoleCommands(cmd, client);
+    } else if (strcmp(path, "/up") == 0 || strcmp(path, "/down") == 0) {
+      // Legacy links: act, then send the browser back to the dashboard so a refresh never re-triggers.
+      setMovementTargetAtDefaultFadeTime(path[1] == 'u' ? config.posUp : config.posDown);
+      client.print(F("HTTP/1.1 303 See Other\r\nLocation: /\r\nConnection: close\r\n\r\n"));
+    } else if (strcmp(path, "/") == 0 || strncmp(path, "/?", 2) == 0) {
+      webHeader(client, "text/html; charset=utf-8");
+      webSend(client, WEB_PAGE, strlen(WEB_PAGE));
+    } else {
+      client.print(F("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"));
+    }
+  }
+  client.flush();
+  client.stop();
 }
 
 void rebootDevice() {
   // Teensy 4.1 software reboot trigger
   Serial.flush();
-  SCB_AIRCR = 0x05FA0004; 
+  SCB_AIRCR = 0x05FA0004;
 }

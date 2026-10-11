@@ -1,6 +1,13 @@
 #include <SPI.h>
+#if defined(ARDUINO_TEENSY41)
+// Teensy 4.1 has a native Ethernet MAC (not a W5x00); use QNEthernet (Library Manager).
+#include <QNEthernet.h>
+using namespace qindesign::network;
+#define USE_QNETHERNET 1
+#else
 #include <Ethernet.h>
 #include <EthernetUdp.h>
+#endif
 #include <OSCMessage.h>
 #include <EEPROM.h>
 #include <Servo.h>
@@ -156,9 +163,14 @@ void setup() {
   dnBound = config.dnBound;
   upBound = config.upBound;
 
+#if defined(USE_QNETHERNET)
+  Ethernet.setMACAddress(mac);
+  networkAvailable = true;
+#else
   Ethernet.init(ETHERNET_CS_PIN);
   Ethernet.begin(mac, IPAddress(0, 0, 0, 0));
   networkAvailable = (Ethernet.hardwareStatus() != EthernetNoHardware);
+#endif
   if (networkAvailable) {
     initNetwork();
     Udp.begin(config.localPort);
@@ -168,6 +180,7 @@ void setup() {
     Serial.println(F("Ethernet hardware not found - network disabled"));
   }
 
+  Serial.println(F("Attaching servo..."));
   myservo.attach(SERVO_PIN);
   currentPos = down;
   targetPos = down;
@@ -179,6 +192,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, ledState);
 
+  Serial.println(F("Starting IR..."));
   IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
 
   evaluateTelemetryRouting(IPAddress(0, 0, 0, 0), 0);
@@ -683,6 +697,19 @@ void processSerialConsole() {
 }
 
 void initNetwork() {
+#if defined(USE_QNETHERNET)
+  IPAddress sIp(config.staticIP[0], config.staticIP[1], config.staticIP[2], config.staticIP[3]);
+  IPAddress sSn(config.subnetMask[0], config.subnetMask[1], config.subnetMask[2], config.subnetMask[3]);
+  IPAddress sGw(config.gatewayIP[0], config.gatewayIP[1], config.gatewayIP[2], config.gatewayIP[3]);
+  bool ok;
+  if (config.preferStatic == 1) {
+    ok = Ethernet.begin(sIp, sSn, sGw);
+  } else {
+    ok = Ethernet.begin() && Ethernet.waitForLocalIP(8000);
+    if (!ok) ok = Ethernet.begin(sIp, sSn, sGw);  // DHCP failed: fall back to static
+  }
+  if (!ok) Serial.println(F("Ethernet start failed"));
+#else
   if (config.preferStatic == 1) {
     IPAddress ip(config.staticIP[0], config.staticIP[1], config.staticIP[2], config.staticIP[3]);
     IPAddress sn(config.subnetMask[0], config.subnetMask[1], config.subnetMask[2], config.subnetMask[3]);
@@ -696,6 +723,7 @@ void initNetwork() {
       Ethernet.begin(mac, ip, gw, gw, sn);
     }
   }
+#endif
   Serial.print(F("Controller IP: "));
   Serial.println(Ethernet.localIP());
 }

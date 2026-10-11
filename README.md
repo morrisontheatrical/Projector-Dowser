@@ -1,7 +1,20 @@
 # Projector Dowser
 
-Firmware and project notes for an Arduino-based projector dowser. The current
-repository sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
+Firmware and project notes for an Arduino/Teensy-based projector dowser. The primary
+sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
+
+## Platform Matrix
+
+| Board | Status | Network | Folder |
+|-------|--------|---------|--------|
+| Arduino Nano R4 | Primary | External W5500 (SPI) | [`firmware/Dowser_Nano_5`](firmware/Dowser_Nano_5/README.md) |
+| Arduino Nano Every | Active (condensed) | External W5500 (SPI) | [`firmware/Dowser_Nano-every_5c`](firmware/Dowser_Nano-every_5c/README.md) |
+| Teensy 4.1 | Active (first adaptation) | Native Ethernet (DP83825 PHY, QNEthernet) | [`firmware/teensy_dowser_1`](firmware/teensy_dowser_1/README.md) |
+| Elegoo Mega 2560 R3 | Archived | None | [`firmware/archived`](firmware/archived/README.md) |
+
+Pinouts, board packages, libraries, and network wiring are in each sketch folder's README. This file covers the
+shared OSC syntax and architecture, documented against the Nano R4 sketch. The Teensy build adds `bootmode`, a
+`reboot` command, and a two-page web UI; the Nano Every build omits the button, LED, and IR controls.
 
 ## Current Firmware and Installed Hardware
 
@@ -32,7 +45,7 @@ The Projector Dowser is a custom-built theatrical automation device that:
 
 | Component | Specification |
 |-----------|---------------|
-| **Microcontroller** | Arduino Nano R4 for the current repository sketch; the separate installed Nano Every versions are described above |
+| **Microcontroller** | Arduino Nano R4 (primary); see the Platform Matrix for the Nano Every and Teensy 4.1 variants |
 | **Motor control** | Servo signal output on pin 3 |
 | **Ethernet interface** | SPI Ethernet interface, chip-select pin 10 |
 | **IR Receiver** | IR receiver input (pin 5; remote protocol/codes depend on the remote) |
@@ -44,6 +57,23 @@ Pin definitions describe the tracked sketch, not a verified wiring diagram for
 each installed board. Confirm the board, Ethernet hardware, power supply, and
 wiring against the actual installation before connecting or uploading firmware.
 
+### W5500 Wiring
+
+| W5500 Pin | Function | Target Board / Signal | Wire Color (Your Setup) | Notes & Status |
+|-----------|----------|-----------------------|-------------------------|----------------|
+| CS / SCSn | Chip Select | D10 | White / Green | Verified (Firmware Default) |
+| SCK / SCLK | SPI Clock | D13 | Brown | Verified |
+| MOSI / SI | SPI Master Out | D11 | Green | Verified |
+| MISO / SO | SPI Master In | D12 | White / Blue | Verified |
+| VDD / 3V3 | Power Input | Regulated 3.3V | Orange (Note below) | Caution Required |
+| GND | Common Ground | GND | White / Orange | Verified |
+| RSTn | Hardware Reset | Reset / 3.3V Pullup | Blue | Optional (Pull High or connect to Reset) |
+| INTn | Interrupt | Unconnected | None | Unused in standard firmware |
+
+The W5500 requires regulated 3.3V power. Do not connect 5V directly to VDD
+unless the specific breakout board provides its own 5V-to-3.3V regulator.
+Check the board's regulator and logic-level specifications before wiring.
+
 ## Network Communication
 
 ### OSC Endpoints
@@ -51,11 +81,11 @@ wiring against the actual installation before connecting or uploading firmware.
 #### Core Movement
 | Endpoint | Args | Description |
 |----------|------|-------------|
-| `/dowser/up` | optional `int` or `float` fade seconds (1-60) | Move to the "up" preset using the default fade time or supplied one-move duration |
-| `/dowser/down` | optional `int` or `float` fade seconds (1-60) | Move to the "down" preset using the default fade time or supplied one-move duration |
-| `/dowser/angle` | `int` or `float` angle, optional `int` or `float` fade seconds (1-60) | Move to a specific angle (degrees), optionally overriding the fade time |
+| `/dowser/up` | optional `int` or `float` fade seconds (0-60) | Move to the "up" preset using the default fade time or supplied one-move duration |
+| `/dowser/down` | optional `int` or `float` fade seconds (0-60) | Move to the "down" preset using the default fade time or supplied one-move duration |
+| `/dowser/angle` | `int` or `float` angle, optional `int` or `float` fade seconds (0-60) | Move to a specific angle (degrees), optionally overriding the fade time |
 | `/dowser/query` | — | Request immediate state broadcast |
-| `/dowser/reset` | optional `int` or `float` fade seconds (1-60) | Move to the down preset, optionally overriding the fade time |
+| `/dowser/reset` | optional `int` or `float` fade seconds (0-60) | Move to the down preset, optionally overriding the fade time |
 
 #### Configuration (GET/SET REST-style)
 | Endpoint | Args | GET Response | SET Behavior |
@@ -70,17 +100,17 @@ wiring against the actual installation before connecting or uploading firmware.
 | `/dowser/config/static` | `0\|1` | Broadcasts static IP mode | Enables/disables static IP |
 | `/dowser/config/telemetry` | `0\|1\|2` | Broadcasts telemetry mode | Sets telemetry routing mode |
 | `/dowser/config/heartbeat` | `0\|1` | Broadcasts heartbeat state | Enables/disables heartbeat |
-| `/dowser/config/fade` | `int` or `float` (1-60 seconds) | Broadcasts default fade time | Sets the default move duration |
+| `/dowser/config/fade` | `int` or `float` (0-60 seconds) | Broadcasts default fade time | Sets the default move duration |
 | `/dowser/config/queryAll` | — | Broadcasts all 13 config fields | N/A (query only) |
 | `/dowser/config/save` | — | N/A | Saves config to EEPROM + reboot |
 
-Fade time is the requested duration for the entire move, in seconds. Integer and decimal values are accepted (for example, `/dowser/up 2.5` fades to the up preset over 2.5 seconds, while `/dowser/angle 90 4.25` takes 4.25 seconds to reach 90°). Times are stored and applied internally to the nearest millisecond. The actual commanded slew rate scales with the distance to the target, so a shorter move takes the requested duration at a lower rate. Shorter times move faster; longer times may reduce abruptness and noise, but do not guarantee a quieter physical servo. The valid range is 1-60 seconds. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; elapsed-time catch-up is capped to 20 ms per update after longer delays.
+Fade time is the requested duration for the entire move, in seconds. Integer and decimal values are accepted (for example, `/dowser/up 0.4` fades to the up preset over 0.4 seconds, while `/dowser/angle 90 4.25` takes 4.25 seconds to reach 90°). Times are stored and applied internally to the nearest millisecond. A `0`-second move writes the target position immediately. The actual commanded slew rate scales with the distance to the target, so a shorter nonzero move takes the requested duration at a lower rate. The valid range is 0-60 seconds. Overrides do not change the configured default. Motion is updated incrementally without blocking the main loop; elapsed-time catch-up is capped to 20 ms per update after longer delays.
 
 Each move keeps the fade time selected when it started. Changing `/dowser/config/fade` or `fade=` affects subsequent moves, not one already in progress. Configuration changes are held in RAM until `save` writes them to EEPROM and reboots the board. Network settings such as the local listening port take effect after reboot.
 
-Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer or float from 1 to 60 seconds. These arguments replace the former speed percentages and millisecond values, so clients sending either must be updated to send seconds. OSC float angles are checked against the configured bounds and then converted to an integer degree. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the stored default position (`config.defaultPos`).
+Movement endpoints accept no arguments to preserve existing no-argument clients; when supplying a fade time, send exactly one integer or float from 0 to 60 seconds. These arguments replace the former speed percentages and millisecond values, so clients sending either must be updated to send seconds. OSC float angles are checked against the configured bounds and then converted to an integer degree. Invalid OSC fade times (including `/dowser/config/fade`) and angles are rejected and returned to the sender as `/dowser/error/fade` and `/dowser/error/angle`, respectively. The serial console also logs each rejection. `/dowser/reset` retains its existing behavior of moving to the down preset (`config.posDown`), not the stored default position (`config.defaultPos`).
 
-Suggested hardware checks: compare short and long fade times, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid fade times (0.99, 60.01, or a non-numeric value) and out-of-bounds angles return errors without starting a move. Query/set `/dowser/config/fade` with no argument, valid integer and decimal values, and invalid values. Set `fade=4.25`, save, and reboot to check persistence; on legacy 0x53/0x55 devices, confirm existing settings remain intact.
+Suggested hardware checks: compare instant (`0`), fractional (`0.4`), and longer (`1`-`60`) fades, repeatedly retarget during a move and confirm it continues from the current reported angle, and verify invalid fade times (below 0, above 60, or non-numeric) and out-of-bounds angles return errors without starting a move. Query/set `/dowser/config/fade` with no argument, valid integer and decimal values, and invalid values. Set `fade=0.4`, save, and reboot to check persistence; on legacy 0x53/0x55 devices, confirm existing settings remain intact.
 
 #### Telemetry (Outbound Broadcasts)
 | Endpoint | Value | Update Frequency |
@@ -187,7 +217,7 @@ up=170              # Set up position to 170°
 dnbound=5           # Set lower hard limit to 5°
 upbound=175         # Set upper hard limit to 175°
 default=90          # Set stored default position to 90°
-fade=3.0            # Set default movement fade time (1-60 seconds)
+fade=0.4            # Set default movement fade time (0-60 seconds)
 localport=8001      # Set listening port
 targetport0=12000   # Set target port 0
 targetport1=53000   # Set target port 1
@@ -227,6 +257,18 @@ client.send_message("/dowser/angle", 135)   # Move to 135°
 client.send_message("/dowser/up", "")        # Move to up
 client.send_message("/dowser/query", "")     # Request state
 ```
+
+### 6. **Web UI (Ethernet, Port 80)**
+Browse to the device IP for a single-page control and configuration UI (served from flash by `WebServer.ino` / `web_page.h`). It has no authentication, so use it on trusted networks only.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Web UI |
+| `GET /api/status` | Position, target, moving state, IP |
+| `GET /api/config` | All settings as JSON |
+| `POST /api/move?to=up\|down\|<angle>[&fade=<sec>]` | Move |
+| `POST /api/config?key=value[&key=value]` | Set settings (same keys as the serial console; autosaved) |
+| `POST /api/reboot` | Save and reboot |
 
 ## Software Architecture
 
@@ -288,11 +330,11 @@ struct DeviceConfiguration {
   uint8_t upBound;              // Upper hard limit (default 173°)
   uint8_t defaultPos;           // Stored boot-position setting (default 10°)
   uint8_t irPresets[10];        // IR preset angles [0-9]
-  uint16_t defaultFadeTimeMs;   // Default movement duration (default 3000 ms)
+  uint16_t defaultFadeTimeMs;   // Default movement duration (default 1000 ms)
 };
 ```
 
-Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 3-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (1-60), and stored to the nearest millisecond. Although `defaultPos` is loaded, the current setup code replaces the startup target before the servo is attached; see the startup sequence below.
+Configuration changes are autosaved to EEPROM after 3 seconds without further edits (no reboot); `save` still writes immediately and reboots, which is needed for network changes to take effect. Stored at EEPROM address 0. Marker `0x53` configurations are migrated in place to marker `0x56` with the existing settings preserved and a 1-second default fade time. Marker `0x55` configurations are migrated with their existing speed converted to an equivalent full-range fade time. Unknown markers trigger factory defaults. Fade times are entered in seconds (0-60), and stored to the nearest millisecond. Although `defaultPos` is loaded, the current setup code replaces the startup target before the servo is attached; see the startup sequence below.
 
 ## Dependency Libraries
 

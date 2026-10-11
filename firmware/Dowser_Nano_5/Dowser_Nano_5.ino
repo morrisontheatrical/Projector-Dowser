@@ -50,24 +50,23 @@ uint8_t activeMoveDistance;
 unsigned long lastMoveUpdateMicros = 0;
 unsigned long movementCredit = 0;
 bool configLoadedSuccessfully = false;
+DeviceConfiguration persistedConfig;
+unsigned long configDirtySince = 0;
+const unsigned long CONFIG_AUTOSAVE_DELAY_MS = 3000;
 
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
-const uint16_t DEFAULT_FADE_TIME_MS = 3000;
-const uint16_t MIN_FADE_TIME_MS = 1000;
+const uint16_t DEFAULT_FADE_TIME_MS = 1000;
+const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
 const unsigned long MICROSECONDS_PER_MILLISECOND = 1000UL;
 // Covers the common 20 ms loop interval while limiting catch-up after blocking operations.
 const unsigned long MAX_MOVEMENT_ELAPSED_US = 20000UL;
 const unsigned long MAX_MOVEMENT_DISTANCE_DEGREES = 180UL;
 static_assert((unsigned long long)MAX_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND +
-                (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES - 1 <= 0xFFFFFFFFULL,
+                (unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES <= 0xFFFFFFFFULL,
               "Motion credit update must fit in unsigned long");
-static_assert((unsigned long long)MAX_MOVEMENT_ELAPSED_US * MAX_MOVEMENT_DISTANCE_DEGREES +
-                (unsigned long long)MIN_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND - 1 <
-                5ULL * MIN_FADE_TIME_MS * MICROSECONDS_PER_MILLISECOND,
-              "A single motion update must advance at most four degrees");
 
 int down;
 int up;
@@ -117,8 +116,11 @@ void broadcastCompanionState();
 void pushStateToTelemetry(const char* notesMsg);
 void initNetwork();
 void loadConfiguration();
+void autosaveConfiguration();
 void parseSerialIP(char* inputStr, uint8_t* ipArray);
 void processTelnetConsole();
+void beginWebServer();
+void processWebServer();
 void processSerialConsole();
 void processPhysicalButton();
 void processIRInput();
@@ -160,6 +162,7 @@ void setup() {
     initNetwork();
     Udp.begin(config.localPort);
     telnetServer.begin();
+    beginWebServer();
   } else {
     Serial.println(F("Ethernet hardware not found - network disabled"));
   }
@@ -202,6 +205,8 @@ void loop() {
 
   processIncomingOSC();
   processTelnetConsole();
+  processWebServer();
+  autosaveConfiguration();
   processSerialConsole();
   processPhysicalButton();
   processIRInput();
@@ -218,9 +223,9 @@ void loop() {
 void updateServo() {
   int previousTargetPos = targetPos;
   if (targetPos > upBound) {
-    targetPos = upBound - 1;
+    targetPos = upBound;
   } else if (targetPos < dnBound) {
-    targetPos = dnBound + 1;
+    targetPos = dnBound;
   }
 
   unsigned long now = micros();
@@ -234,7 +239,14 @@ void updateServo() {
   // Discard excess elapsed time after blocking operations rather than catching up in a large jump.
   if (elapsed > MAX_MOVEMENT_ELAPSED_US) elapsed = MAX_MOVEMENT_ELAPSED_US;
 
-  if (currentPos != targetPos) {
+  if (activeMoveFadeTimeMs == 0) {
+    if (currentPos != targetPos) {
+      currentPos = targetPos;
+      myservo.write(currentPos);
+    }
+    movementCredit = 0;
+    activeMoveDistance = 0;
+  } else if (currentPos != targetPos) {
     unsigned long fadeDurationUs = (unsigned long)activeMoveFadeTimeMs * MICROSECONDS_PER_MILLISECOND;
     movementCredit += elapsed * activeMoveDistance;
     unsigned long steps = movementCredit / fadeDurationUs;
@@ -272,9 +284,9 @@ void updateServo() {
 
 void setMovementTarget(int target, uint16_t fadeTimeMs) {
   if (target > upBound) {
-    targetPos = upBound - 1;
+    targetPos = upBound;
   } else if (target < dnBound) {
-    targetPos = dnBound + 1;
+    targetPos = dnBound;
   } else {
     targetPos = target;
   }
@@ -325,7 +337,7 @@ void sendOSCError(const char* path, const char* message) {
 }
 
 void reportInvalidMovementFadeTime() {
-  sendOSCError("/dowser/error/fade", "Fade time must be a number from 1-60 seconds");
+  sendOSCError("/dowser/error/fade", "Fade time must be a number from 0-60 seconds");
 }
 
 void reportInvalidMovementAngle() {
@@ -834,7 +846,7 @@ void loadConfiguration() {
 
   if (config.magicNumber != EEPROM_MAGIC_V3) {
     config.magicNumber = EEPROM_MAGIC_V3;
-    config.preferStatic = 1;
+    config.preferStatic = 0;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
     config.staticIP[2] = 0;
@@ -870,6 +882,26 @@ void loadConfiguration() {
   } else if (!isValidFadeTime(config.defaultFadeTimeMs)) {
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     EEPROM.put(0, config);
+  }
+  persistedConfig = config;
+}
+
+// Persists config changes once they have been stable for CONFIG_AUTOSAVE_DELAY_MS,
+// so rapid edits cost a single write. Settings like IP/ports still apply after reboot.
+void autosaveConfiguration() {
+  if (memcmp(&config, &persistedConfig, sizeof(config)) == 0) {
+    configDirtySince = 0;
+    return;
+  }
+  unsigned long now = millis();
+  if (configDirtySince == 0) {
+    configDirtySince = now ? now : 1;
+    return;
+  }
+  if (now - configDirtySince >= CONFIG_AUTOSAVE_DELAY_MS) {
+    EEPROM.put(0, config);
+    persistedConfig = config;
+    configDirtySince = 0;
   }
 }
 
@@ -936,7 +968,7 @@ bool isValidFadeTime(int fadeTimeMs) {
 }
 
 bool convertFadeTimeSeconds(float seconds, uint16_t& fadeTimeMs) {
-  if (!(seconds >= 1.0f && seconds <= 60.0f)) return false;
+  if (!(seconds >= 0.0f && seconds <= 60.0f)) return false;
   fadeTimeMs = (uint16_t)(seconds * 1000.0f + 0.5f);
   return true;
 }
@@ -949,8 +981,9 @@ bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
   bool hasDigit = false;
   while (isdigit((unsigned char)*value)) {
     hasDigit = true;
-    wholeSeconds = wholeSeconds * 10 + (unsigned int)(*value++ - '0');
-    if (wholeSeconds > 60) return false;
+    unsigned int digit = (unsigned int)(*value++ - '0');
+    if (wholeSeconds > 6 || (wholeSeconds == 6 && digit > 0)) return false;
+    wholeSeconds = wholeSeconds * 10 + digit;
   }
 
   unsigned int fractionalMs = 0;
@@ -975,7 +1008,7 @@ bool parseFadeTimeSeconds(const char* value, uint16_t& fadeTimeMs) {
   }
 
   while (isspace((unsigned char)*value)) value++;
-  if (!hasDigit || *value != '\0' || wholeSeconds < 1 ||
+  if (!hasDigit || *value != '\0' ||
       (wholeSeconds == 60 && hasNonZeroFraction)) return false;
 
   unsigned int totalMs = wholeSeconds * 1000 + fractionalMs + (roundUp ? 1 : 0);
@@ -1000,7 +1033,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.println(F("  key=value      change a setting (staged until save):"));
     output.println(F("    down, up, default      angles, e.g. up=120"));
     output.println(F("    dnbound, upbound       limits 0-180"));
-    output.println(F("    fade                   seconds 1-60, e.g. fade=2.5"));
+    output.println(F("    fade                   seconds 0-60, e.g. fade=0.4"));
     output.println(F("    localport, targetport[0-2]"));
     output.println(F("    static (0/1), telemetry, heartbeat (0/1)"));
     output.println(F("    ip, targetip           e.g. ip=192.168.1.50"));
@@ -1131,7 +1164,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
       config.defaultFadeTimeMs = fadeTimeMs;
       dispatchMessage(source, F("Set Default Fade (ms) -> "), fadeTimeMs);
     } else {
-      dispatchMessage(source, F("Error: Fade must be 1-60 seconds"));
+      dispatchMessage(source, F("Error: Fade must be 0-60 seconds"));
     }
   } else if (parseKeyValue(input, "localport", val)) {
     config.localPort = val;

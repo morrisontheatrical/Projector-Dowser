@@ -5,11 +5,15 @@
 #include <EEPROM.h>
 #include <Servo.h>
 #include <ctype.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>  // "LiquidCrystal I2C" by Frank de Brabander
+#include <DMXSerial.h>           // "DMXSerial" by Matthias Hertel (uses USART1: D0 = RX)
 
 // --- PHYSICAL PIN CONFIGURATION ---
-//#define BUTTON_PIN 2
+#define BUTTON_PIN 2      // to GND, short press toggles up/down
 #define SERVO_PIN 3
 #define ETHERNET_CS_PIN 10
+#define DMX_DIR_PIN 4     // held LOW (receive); optional, tie MAX485 RE+DE here or to GND
 //#define IR_RECEIVE_PIN 5
 //#define LED_PIN 4
 
@@ -40,6 +44,8 @@ struct DeviceConfiguration {
   //uint8_t irPresets[10];
   // Keep new fields appended here; EEPROM_MAGIC_V1 migration assumes the legacy prefix is unchanged.
   uint16_t defaultFadeTimeMs;
+  uint16_t dmxAddress;       // 1-512
+  uint8_t dmxEnabled;
 };
 
 int targetPos;
@@ -57,6 +63,8 @@ const unsigned long CONFIG_AUTOSAVE_DELAY_MS = 3000;
 const uint8_t EEPROM_MAGIC_V1 = 0x53;
 const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
+const uint8_t EEPROM_MAGIC_V4 = 0x57;
+const unsigned long DMX_TIMEOUT_MS = 1000;
 const uint16_t DEFAULT_FADE_TIME_MS = 1000;
 const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
@@ -100,6 +108,12 @@ const char* currentPresetName = "System Boot";
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50;
 
+LiquidCrystal_I2C* lcd = nullptr;
+unsigned long lastLcdDrawMs = 0;
+int lastDmxValue = -1;
+bool lastButtonReading = HIGH;
+bool stableButtonState = HIGH;
+
 bool editPos = false;
 bool presetMode = true;
 bool pauseMV = false;
@@ -119,8 +133,10 @@ void loadConfiguration();
 //void autosaveConfiguration();
 void parseSerialIP(char* inputStr, uint8_t* ipArray);
 void processTelnetConsole();
-void beginWebServer();
-void processWebServer();
+void initLcd();
+void updateLcd();
+void processDmx();
+void processButton();
 void processSerialConsole();
 //void processPhysicalButton();
 //void processIRInput();
@@ -162,7 +178,6 @@ void setup() {
     initNetwork();
     Udp.begin(config.localPort);
     telnetServer.begin();
-    beginWebServer();
   } else {
     Serial.println(F("Ethernet hardware not found - network disabled"));
   }
@@ -174,7 +189,10 @@ void setup() {
   myservo.write(currentPos);
   lastMoveUpdateMicros = micros();
 
-  //pinMode(BUTTON_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  initLcd();
+  DMXSerial.init(DMXReceiver, DMX_DIR_PIN);
+  DMXSerial.maxChannel(config.dmxAddress);
   //pinMode(LED_PIN, OUTPUT);
   //digitalWrite(LED_PIN, ledState);
 
@@ -205,10 +223,11 @@ void loop() {
 
   processIncomingOSC();
   processTelnetConsole();
-  processWebServer();
   //autosaveConfiguration();
   processSerialConsole();
-  //processPhysicalButton();
+  processButton();
+  processDmx();
+  updateLcd();
   //processIRInput();
   updateServo();
 
@@ -280,6 +299,58 @@ void updateServo() {
     broadcastCompanionState();
     lastReportedPos = currentPos;
   }
+}
+
+void initLcd() {
+  Wire.begin();
+  Wire.setClock(400000);
+  uint8_t addr = 0;
+  for (uint8_t a = 0x20; a < 0x80 && !addr; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) addr = a;
+  }
+  if (!addr) {
+    Serial.println(F("No I2C LCD found - display disabled"));
+    return;
+  }
+  Serial.print(F("LCD I2C address: 0x"));
+  Serial.println(addr, HEX);
+  lcd = new LiquidCrystal_I2C(addr, 16, 2);  // change to 20, 4 for a 20x4 screen
+  lcd->init();
+  lcd->backlight();
+}
+
+void updateLcd() {
+  if (!lcd) return;
+  unsigned long now = millis();
+  if (now - lastLcdDrawMs < 250) return;
+  lastLcdDrawMs = now;
+  char line[17];
+  snprintf(line, sizeof(line), "Angle:%3d Ad:%3u", currentPos, config.dmxAddress);
+  lcd->setCursor(0, 0);
+  lcd->print(line);
+  if (!config.dmxEnabled) {
+    snprintf(line, sizeof(line), "%-16s", "DMX off");
+  } else if (DMXSerial.noDataSince() < DMX_TIMEOUT_MS) {
+    snprintf(line, sizeof(line), "DMX in: %-8u", DMXSerial.read(config.dmxAddress));
+  } else {
+    snprintf(line, sizeof(line), "%-16s", "No DMX signal");
+  }
+  lcd->setCursor(0, 1);
+  lcd->print(line);
+}
+
+// DMX only moves the servo when the channel value changes (or on first lock),
+// so OSC, console and button commands still win until the console sends a new value.
+void processDmx() {
+  if (!config.dmxEnabled || DMXSerial.noDataSince() >= DMX_TIMEOUT_MS) {
+    lastDmxValue = -1;
+    return;
+  }
+  int value = DMXSerial.read(config.dmxAddress);
+  if (value == lastDmxValue) return;
+  lastDmxValue = value;
+  setMovementTarget(map(value, 0, 255, config.posDown, config.posUp), 0);
 }
 
 void setMovementTarget(int target, uint16_t fadeTimeMs) {
@@ -630,6 +701,21 @@ void dispatchMessage(const char* source, const __FlashStringHelper* prefix, int3
   }
 }
 
+void processButton() {
+  bool reading = digitalRead(BUTTON_PIN);
+  if (reading != lastButtonReading) {
+    lastDebounceTime = millis();
+    lastButtonReading = reading;
+  }
+  if (millis() - lastDebounceTime > debounceDelay && reading != stableButtonState) {
+    stableButtonState = reading;
+    if (stableButtonState == LOW) {
+      setMovementTargetAtDefaultFadeTime(targetPos == config.posUp ? config.posDown : config.posUp);
+      dispatchMessage("BUTTON", F("Move -> "), targetPos);
+    }
+  }
+}
+
 void processSerialConsole() {
   static char serialBuffer[48];
   static uint8_t serialBufIdx = 0;
@@ -719,8 +805,6 @@ void loadConfiguration() {
   if (config.magicNumber == EEPROM_MAGIC_V1) {
     config.magicNumber = EEPROM_MAGIC_V3;
     config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
-    EEPROM.put(0, config);
-    return;
   }
 
   if (config.magicNumber == EEPROM_MAGIC_V2) {
@@ -735,12 +819,21 @@ void loadConfiguration() {
     } else {
       config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
     }
+  }
+
+  if (config.magicNumber == EEPROM_MAGIC_V1 || config.magicNumber == EEPROM_MAGIC_V2 || config.magicNumber == EEPROM_MAGIC_V3) {
+    config.magicNumber = EEPROM_MAGIC_V4;
+    config.dmxAddress = 1;
+    config.dmxEnabled = 1;
     EEPROM.put(0, config);
+    persistedConfig = config;
     return;
   }
 
-  if (config.magicNumber != EEPROM_MAGIC_V3) {
-    config.magicNumber = EEPROM_MAGIC_V3;
+  if (config.magicNumber != EEPROM_MAGIC_V4) {
+    config.magicNumber = EEPROM_MAGIC_V4;
+    config.dmxAddress = 1;
+    config.dmxEnabled = 1;
     config.preferStatic = 0;
     config.staticIP[0] = 10;
     config.staticIP[1] = 0;
@@ -774,8 +867,9 @@ void loadConfiguration() {
     //uint8_t defaultIR[10] = { 10, 10, 10, 10, 10, 125, 170, 170, 170, 170 };
     //memcpy(config.irPresets, defaultIR, 10);
     EEPROM.put(0, config);
-  } else if (!isValidFadeTime(config.defaultFadeTimeMs)) {
-    config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+  } else if (!isValidFadeTime(config.defaultFadeTimeMs) || config.dmxAddress < 1 || config.dmxAddress > 512) {
+    if (!isValidFadeTime(config.defaultFadeTimeMs)) config.defaultFadeTimeMs = DEFAULT_FADE_TIME_MS;
+    if (config.dmxAddress < 1 || config.dmxAddress > 512) config.dmxAddress = 1;
     EEPROM.put(0, config);
   }
   persistedConfig = config;
@@ -918,7 +1012,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
 
   if (strcasecmp(input, "help") == 0 || strcmp(input, "?") == 0) {
 #if defined(__AVR__)
-    output.println(F("<angle>, up, down, show, save, key=value. Keys: down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
+    output.println(F("<angle>, up, down, show, save, key=value. Keys: dmx, dmxen, down, up, dnbound, upbound, default, fade(s), localport, targetport[0-2], static, telemetry, heartbeat, ip, targetip"));
 #else
     output.println(F("Commands:"));
     output.println(F("  <angle>        move to angle, e.g. 90"));
@@ -929,6 +1023,8 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.println(F("    down, up, default      angles, e.g. up=120"));
     output.println(F("    dnbound, upbound       limits 0-180"));
     output.println(F("    fade                   seconds 0-60, e.g. fade=0.4"));
+    output.println(F("    dmx                    DMX address 1-512, e.g. dmx=150"));
+    output.println(F("    dmxen                  DMX control (0/1)"));
     output.println(F("    localport, targetport[0-2]"));
     output.println(F("    static (0/1), telemetry, heartbeat (0/1)"));
     output.println(F("    ip, targetip           e.g. ip=192.168.1.50"));
@@ -992,6 +1088,9 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     output.print(F("Current Position: "));
     output.print(currentPos);
     output.println(F(" deg"));
+    output.print(F("DMX Address   : "));
+    output.print(config.dmxAddress);
+    output.println(config.dmxEnabled ? F(" (enabled)") : F(" (disabled)"));
     output.print(F("Default Fade  : "));
     output.print(config.defaultFadeTimeMs / 1000);
     output.print('.');
@@ -1028,7 +1127,20 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     }
   }
 
-  if (parseKeyValue(input, "down", val)) {
+  if (parseKeyValue(input, "dmx", val)) {
+    if (val >= 1 && val <= 512) {
+      config.dmxAddress = val;
+      DMXSerial.maxChannel(val);
+      lastDmxValue = -1;
+      dispatchMessage(source, F("Set DMX Address -> "), val);
+    } else {
+      output.println(F("Error: DMX address must be 1-512"));
+    }
+  } else if (parseKeyValue(input, "dmxen", val)) {
+    config.dmxEnabled = (val == 1) ? 1 : 0;
+    lastDmxValue = -1;
+    dispatchMessage(source, F("Set DMX Enabled -> "), config.dmxEnabled);
+  } else if (parseKeyValue(input, "down", val)) {
     if (val >= config.dnBound && val <= config.upBound) {
       config.posDown = val;
       dispatchMessage(source, F("Set Down -> "), val);

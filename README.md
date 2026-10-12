@@ -14,7 +14,7 @@ sketch is `firmware/Dowser_Nano_5/Dowser_Nano_5.ino`.
 
 Pinouts, board packages, libraries, and network wiring are in each sketch folder's README. This file covers the
 shared OSC syntax and architecture, documented against the Nano R4 sketch. The Teensy build adds `bootmode`, a
-`reboot` command, and a two-page web UI; the Nano Every build omits the button, LED, and IR controls.
+`reboot` command, and a two-page web UI; the Nano Every build has no web UI, LED or IR, but adds a button, I2C LCD and DMX input (see its README).
 
 ## Current Firmware and Installed Hardware
 

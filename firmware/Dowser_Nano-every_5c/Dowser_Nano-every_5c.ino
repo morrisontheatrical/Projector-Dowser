@@ -65,6 +65,7 @@ const uint8_t EEPROM_MAGIC_V2 = 0x55;
 const uint8_t EEPROM_MAGIC_V3 = 0x56;
 const uint8_t EEPROM_MAGIC_V4 = 0x57;
 const unsigned long DMX_TIMEOUT_MS = 1000;
+const unsigned long DMX_CATCHUP_DEG_PER_S = 120;  // max slew when DMX takes over from a non-DMX move
 const uint16_t DEFAULT_FADE_TIME_MS = 1000;
 const uint16_t MIN_FADE_TIME_MS = 0;
 const uint16_t MAX_FADE_TIME_MS = 60000;
@@ -111,6 +112,10 @@ const unsigned long debounceDelay = 50;
 LiquidCrystal_I2C* lcd = nullptr;
 unsigned long lastLcdDrawMs = 0;
 int lastDmxValue = -1;
+bool dmxOwnsServo = false;  // false once OSC/console/button moves the servo
+bool dmxCatchingUp = false;
+unsigned long lastCatchUpMs = 0;
+float catchUpCredit = 0;
 bool lastButtonReading = HIGH;
 bool stableButtonState = HIGH;
 
@@ -340,20 +345,50 @@ void updateLcd() {
   lcd->print(line);
 }
 
-// DMX only moves the servo when the channel value changes (or on first lock),
-// so OSC, console and button commands still win until the console sends a new value.
+// DMX only moves the servo when the channel value changes, so OSC, console and
+// button commands hold until the console sends a new value. lastDmxValue is kept
+// across signal dropouts; -1 means "adopt the next value without moving" (boot,
+// address change, DMX re-enabled). When DMX takes over from a non-DMX move, the
+// servo slews to the DMX position at a limited rate instead of jumping.
 void processDmx() {
-  if (!config.dmxEnabled || DMXSerial.noDataSince() >= DMX_TIMEOUT_MS) {
-    lastDmxValue = -1;
+  if (!config.dmxEnabled || DMXSerial.noDataSince() >= DMX_TIMEOUT_MS) return;
+  int value = DMXSerial.read(config.dmxAddress);
+  bool changed = (value != lastDmxValue);
+  if (changed) {
+    bool adopt = (lastDmxValue < 0);
+    lastDmxValue = value;
+    if (adopt) return;
+    if (!dmxOwnsServo) {
+      dmxCatchingUp = true;
+      lastCatchUpMs = millis();
+      catchUpCredit = 0;
+    }
+  } else if (!dmxCatchingUp) {
     return;
   }
-  int value = DMXSerial.read(config.dmxAddress);
-  if (value == lastDmxValue) return;
-  lastDmxValue = value;
-  setMovementTarget(map(value, 0, 255, config.posDown, config.posUp), 0);
+
+  int target = map(value, 0, 255, config.posDown, config.posUp);
+  if (dmxCatchingUp) {
+    unsigned long now = millis();
+    catchUpCredit += (now - lastCatchUpMs) * (DMX_CATCHUP_DEG_PER_S / 1000.0f);
+    lastCatchUpMs = now;
+    int step = (int)catchUpCredit;
+    if (step < 1) return;
+    catchUpCredit -= step;
+    int diff = target - currentPos;
+    if (abs(diff) <= step) {
+      dmxCatchingUp = false;
+    } else {
+      target = currentPos + (diff > 0 ? step : -step);
+    }
+  }
+  setMovementTarget(target, 0);
+  dmxOwnsServo = true;
 }
 
 void setMovementTarget(int target, uint16_t fadeTimeMs) {
+  dmxOwnsServo = false;
+  dmxCatchingUp = false;
   if (target > upBound) {
     targetPos = upBound;
   } else if (target < dnBound) {
@@ -1130,6 +1165,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
   if (parseKeyValue(input, "dmx", val)) {
     if (val >= 1 && val <= 512) {
       config.dmxAddress = val;
+      EEPROM.put(offsetof(DeviceConfiguration, dmxAddress), config.dmxAddress);
       DMXSerial.maxChannel(val);
       lastDmxValue = -1;
       dispatchMessage(source, F("Set DMX Address -> "), val);
@@ -1138,6 +1174,7 @@ void handleCommonConsoleCommands(char* input, Print& output) {
     }
   } else if (parseKeyValue(input, "dmxen", val)) {
     config.dmxEnabled = (val == 1) ? 1 : 0;
+    EEPROM.put(offsetof(DeviceConfiguration, dmxEnabled), config.dmxEnabled);
     lastDmxValue = -1;
     dispatchMessage(source, F("Set DMX Enabled -> "), config.dmxEnabled);
   } else if (parseKeyValue(input, "down", val)) {

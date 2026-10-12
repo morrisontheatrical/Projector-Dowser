@@ -431,7 +431,8 @@ On power-up or reboot:
 - [ ] Diagnostic telemetry (servo current, temperature, error states)
 - [ ] Web UI for configuration (via simple HTTP server)
 - [ ] Dual-servo support (for separate iris + shutter)
-- [ ] DMX input fallback (via additional module)
+- [x] DMX input (Nano Every build, MAX485 + DMXSerial)
+- [ ] RDM position feedback to the lighting console (needs a more powerful board; see the Nano Every README)
 
 ## License
 
